@@ -234,12 +234,18 @@ def login_google(request: Request):
     return _google_redirect(request)
 
 
+# sign-ins started but not yet returned from Google: a double tap or a second
+# tab starts another, and each callback must still find its own state
+MAX_PENDING_OAUTH = 5
+
+
 def _google_redirect(request: Request, consent: bool = False, login_hint: str | None = None):
     state = auth_mod.new_state()
-    request.session["oauth_state"] = state
-    # the callback must know whether this round already showed the consent
-    # screen, so a missing refresh token re-prompts once, not forever
-    request.session["oauth_consent"] = consent
+    # state -> whether this round shows the consent screen, so a missing
+    # refresh token re-prompts once, not forever; oldest dropped first
+    pending = dict(request.session.get("oauth_states") or {})
+    pending[state] = consent
+    request.session["oauth_states"] = dict(list(pending.items())[-MAX_PENDING_OAUTH:])
     return RedirectResponse(
         auth_mod.login_url(settings.google_client_id, oauth_redirect_uri(), state,
                            consent=consent, login_hint=login_hint),
@@ -264,12 +270,18 @@ def auth_callback(
     request: Request, session: Session = Depends(get_session),
     code: str = "", state: str = "", error: str = "",
 ):
-    expected_state = request.session.pop("oauth_state", None)
-    consented = request.session.pop("oauth_consent", False)
+    # each state is good for one callback; the other pending ones stay
+    pending = dict(request.session.get("oauth_states") or {})
+    known = bool(state) and state in pending
+    consented = pending.pop(state, False) if known else False
+    request.session["oauth_states"] = pending
     if error:
         # e.g. access_denied: they cancelled on Google's consent screen
         return _login_failed(request, "Google sign-in was cancelled. Try again when you're ready.")
-    if not code or not expected_state or state != expected_state:
+    if not code or not known:
+        if request.session.get("user_id"):
+            # the other tab's sign-in already finished: this one has nothing to add
+            return RedirectResponse(url="/", status_code=303)
         return _login_failed(request, "That sign-in link expired. Please sign in again.")
     redirect_uri = oauth_redirect_uri()
     try:
@@ -298,6 +310,9 @@ def auth_callback(
         enqueue_sync_once(session, "classroom", user.email)
     # a fresh session: nothing from before sign-in (CSRF token, flash) carries over
     request.session.clear()
+    if pending:
+        # another tab's sign-in is still at Google; let it land too
+        request.session["oauth_states"] = pending
     request.session["user_id"] = str(user.id)
     request.session["session_version"] = user.session_version
     return RedirectResponse(url="/", status_code=303)

@@ -7,7 +7,9 @@ API under the owner's refresh token, which needs the drive.readonly scope
 - Binary files (PDF, PPTX, DOCX, text): files.get_media, capped at MAX_BYTES.
 - Google Docs/Slides/Sheets have no bytes: exported to text/plain or CSV.
 - Shortcuts are followed one hop to shortcutDetails.targetId (Drive refuses
-  to create a shortcut to a shortcut); the target's metadata decides.
+  to create a shortcut to a shortcut); the target's metadata decides. A
+  link-shared target may need the shortcut's targetResourceKey, sent in the
+  X-Goog-Drive-Resource-Keys header on every request for the target.
 - DriveError = worth retrying (no Drive grant yet, network, 5xx): the
   pipeline leaves the resource pending. ExtractError = permanent (gone,
   unsupported type, too large): the resource is marked failed.
@@ -82,7 +84,7 @@ class DriveClient:
         if fid is None:
             return False
         try:
-            _, meta = self._resolve(fid, "capabilities/canDownload")
+            _, _, meta = self._resolve(fid, "capabilities/canDownload")
         except (DriveError, ExtractError):
             return False
         return (meta.get("capabilities") or {}).get("canDownload") is True
@@ -93,34 +95,37 @@ class DriveClient:
         if fid is None:
             raise ExtractError(f"not a Drive file URL: {url}")
         files = self.service.files()
-        fid, meta = self._resolve(fid, "size")
+        fid, key, meta = self._resolve(fid, "size")
         mime = meta.get("mimeType") or ""
         if mime in EXPORTS:
-            blob = self._call(files.export(fileId=fid, mimeType=EXPORTS[mime]))
+            blob = self._call(_keyed(files.export(fileId=fid, mimeType=EXPORTS[mime]),
+                                     fid, key))
             return _capped(blob), EXPORTS[mime]
         if mime.startswith("application/vnd.google-apps."):
             raise ExtractError(f"unsupported Google file type {mime}")
         if int(meta.get("size") or 0) > MAX_BYTES:
             raise ExtractError(f"Drive file is over {MAX_BYTES // (1024 * 1024)} MB")
-        blob = self._call(files.get_media(fileId=fid, supportsAllDrives=True))
+        blob = self._call(_keyed(files.get_media(fileId=fid, supportsAllDrives=True),
+                                 fid, key))
         return _capped(blob), mime or None
 
-    def _resolve(self, fid: str, fields: str) -> tuple[str, dict]:
-        """(file id, metadata with mimeType + `fields`), following a shortcut
-        to its target. A shortcut costs one extra metadata call."""
+    def _resolve(self, fid: str, fields: str) -> tuple[str, str | None, dict]:
+        """(file id, resource key, metadata with mimeType + `fields`), following
+        a shortcut to its target. A shortcut costs one extra metadata call."""
         files = self.service.files()
         meta = self._call(files.get(fileId=fid, fields=f"mimeType,shortcutDetails,{fields}",
                                     supportsAllDrives=True))
         if meta.get("mimeType") != SHORTCUT:
-            return fid, meta
-        target = (meta.get("shortcutDetails") or {}).get("targetId")
+            return fid, None, meta
+        details = meta.get("shortcutDetails") or {}
+        target, key = details.get("targetId"), details.get("targetResourceKey")
         if not target:
             raise ExtractError("Drive shortcut has no target")
-        meta = self._call(files.get(fileId=target, fields=f"mimeType,{fields}",
-                                    supportsAllDrives=True))
+        meta = self._call(_keyed(files.get(fileId=target, fields=f"mimeType,{fields}",
+                                           supportsAllDrives=True), target, key))
         if meta.get("mimeType") == SHORTCUT:
             raise ExtractError("Drive shortcut points at another shortcut")
-        return target, meta
+        return target, key, meta
 
     @staticmethod
     def _call(request):
@@ -148,6 +153,13 @@ class DriveClient:
             raise DriveError(f"Drive returned {status}") from e
         except (OSError, TimeoutError) as e:
             raise DriveError(f"Drive download failed: {e}") from e
+
+
+def _keyed(request, fid: str, key: str | None):
+    """Attach a link-shared file's resource key to a Drive request."""
+    if key:
+        request.headers["X-Goog-Drive-Resource-Keys"] = f"{fid}/{key}"
+    return request
 
 
 def _capped(blob) -> bytes:

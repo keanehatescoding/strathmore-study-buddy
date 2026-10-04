@@ -154,12 +154,18 @@ def forget_revoked_token(session: Session, user: User, token: str) -> bool:
     gets a new token instead of skipping the bounce for a dead one."""
     session.rollback()
     session.refresh(user)
-    if refresh_token_for(user) != token:
+    sealed = user.google_refresh_token
+    if sealed is None or refresh_token_for(user) != token:
         return False
-    user.google_refresh_token = None
-    session.add(user)
+    # compare-and-clear in the UPDATE itself: a sign-in that stores a fresh
+    # token between the read above and this write must not be wiped
+    cleared = session.exec(
+        update(User).where(User.id == user.id, User.google_refresh_token == sealed)
+        .values(google_refresh_token=None)
+    ).rowcount
     session.commit()
-    return True
+    session.refresh(user)
+    return cleared == 1
 
 
 def find_user(session: Session, email: str) -> User | None:

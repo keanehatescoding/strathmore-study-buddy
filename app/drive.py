@@ -6,6 +6,11 @@ API under the owner's refresh token, which needs the drive.readonly scope
 
 - Binary files (PDF, PPTX, DOCX, text): files.get_media, capped at MAX_BYTES.
 - Google Docs/Slides/Sheets have no bytes: exported to text/plain or CSV.
+- Shortcuts are followed one hop to shortcutDetails.targetId (Drive refuses
+  to create a shortcut to a shortcut); the target's metadata decides. A
+  link-shared target may need the shortcut's targetResourceKey, sent in the
+  X-Goog-Drive-Resource-Keys header on every request for the target. A
+  link-shared file's own key comes from the URL's ?resourcekey= parameter.
 - DriveError = worth retrying (no Drive grant yet, network, 5xx): the
   pipeline leaves the resource pending. ExtractError = permanent (gone,
   unsupported type, too large): the resource is marked failed.
@@ -16,11 +21,14 @@ google-* imports are lazy, like app.classroom.
 from __future__ import annotations
 
 import re
+from urllib.parse import parse_qs, urlsplit
 
 from app.extract import MAX_DOWNLOAD_BYTES, ExtractError
 
 SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 MAX_BYTES = MAX_DOWNLOAD_BYTES
+
+SHORTCUT = "application/vnd.google-apps.shortcut"
 
 # Google-native types -> export mime the extractor reads
 EXPORTS = {
@@ -45,6 +53,11 @@ def file_id(url: str | None) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+def resource_key(url: str | None) -> str | None:
+    """The ?resourcekey= of a link-shared file's URL, if any."""
+    return parse_qs(urlsplit(url or "").query).get("resourcekey", [None])[0]
 
 
 def build_service(client_id: str, client_secret: str, refresh_token: str):
@@ -78,8 +91,8 @@ class DriveClient:
         if fid is None:
             return False
         try:
-            meta = self._call(self.service.files().get(
-                fileId=fid, fields="capabilities/canDownload", supportsAllDrives=True))
+            _, _, meta = self._resolve(fid, "capabilities/canDownload",
+                                       resource_key(url))
         except (DriveError, ExtractError):
             return False
         return (meta.get("capabilities") or {}).get("canDownload") is True
@@ -90,18 +103,40 @@ class DriveClient:
         if fid is None:
             raise ExtractError(f"not a Drive file URL: {url}")
         files = self.service.files()
-        meta = self._call(files.get(fileId=fid, fields="mimeType,size",
-                                    supportsAllDrives=True))
+        fid, key, meta = self._resolve(fid, "size", resource_key(url))
         mime = meta.get("mimeType") or ""
         if mime in EXPORTS:
-            blob = self._call(files.export(fileId=fid, mimeType=EXPORTS[mime]))
+            blob = self._call(_keyed(files.export(fileId=fid, mimeType=EXPORTS[mime]),
+                                     fid, key))
             return _capped(blob), EXPORTS[mime]
         if mime.startswith("application/vnd.google-apps."):
             raise ExtractError(f"unsupported Google file type {mime}")
         if int(meta.get("size") or 0) > MAX_BYTES:
             raise ExtractError(f"Drive file is over {MAX_BYTES // (1024 * 1024)} MB")
-        blob = self._call(files.get_media(fileId=fid, supportsAllDrives=True))
+        blob = self._call(_keyed(files.get_media(fileId=fid, supportsAllDrives=True),
+                                 fid, key))
         return _capped(blob), mime or None
+
+    def _resolve(self, fid: str, fields: str,
+                 key: str | None = None) -> tuple[str, str | None, dict]:
+        """(file id, resource key, metadata with mimeType + `fields`), following
+        a shortcut to its target. `key` is the URL's own resource key. A
+        shortcut costs one extra metadata call."""
+        files = self.service.files()
+        meta = self._call(_keyed(
+            files.get(fileId=fid, fields=f"mimeType,shortcutDetails,{fields}",
+                      supportsAllDrives=True), fid, key))
+        if meta.get("mimeType") != SHORTCUT:
+            return fid, key, meta
+        details = meta.get("shortcutDetails") or {}
+        target, key = details.get("targetId"), details.get("targetResourceKey")
+        if not target:
+            raise ExtractError("Drive shortcut has no target")
+        meta = self._call(_keyed(files.get(fileId=target, fields=f"mimeType,{fields}",
+                                           supportsAllDrives=True), target, key))
+        if meta.get("mimeType") == SHORTCUT:
+            raise ExtractError("Drive shortcut points at another shortcut")
+        return target, key, meta
 
     @staticmethod
     def _call(request):
@@ -129,6 +164,13 @@ class DriveClient:
             raise DriveError(f"Drive returned {status}") from e
         except (OSError, TimeoutError) as e:
             raise DriveError(f"Drive download failed: {e}") from e
+
+
+def _keyed(request, fid: str, key: str | None):
+    """Attach a link-shared file's resource key to a Drive request."""
+    if key:
+        request.headers["X-Goog-Drive-Resource-Keys"] = f"{fid}/{key}"
+    return request
 
 
 def _capped(blob) -> bytes:

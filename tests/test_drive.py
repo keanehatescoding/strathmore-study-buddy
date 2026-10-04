@@ -6,6 +6,7 @@ from app import drive
 from app.extract import ExtractError
 
 FID = "1AbCdEfGhIjKlMnOp"
+TARGET = "1TargetFileIdXyz"
 
 
 class _Req:
@@ -19,20 +20,21 @@ class _Req:
 
 
 class _Files:
-    def __init__(self, meta, media=b"", exported=b"", fail=None):
+    def __init__(self, meta, media=b"", exported=b"", fail=None, by_id=None):
         self.meta, self.media, self.exported, self.fail = meta, media, exported, fail
+        self.by_id = by_id or {}  # per-file metadata, e.g. a shortcut's target
         self.calls = []
 
     def get(self, fileId, fields, supportsAllDrives):
         self.calls.append(("get", fileId))
-        return _Req(self.fail or self.meta)
+        return _Req(self.fail or self.by_id.get(fileId, self.meta))
 
     def get_media(self, fileId, supportsAllDrives):
         self.calls.append(("media", fileId))
         return _Req(self.media)
 
     def export(self, fileId, mimeType):
-        self.calls.append(("export", mimeType))
+        self.calls.append(("export", fileId, mimeType))
         return _Req(self.exported)
 
 
@@ -152,3 +154,56 @@ def test_can_read_is_false_on_any_refusal(fail):
 def test_can_read_rejects_non_drive_urls():
     client, files = _client(meta={"capabilities": {"canDownload": True}})
     assert not client.can_read("https://example.com/x.pdf") and files.calls == []
+
+
+def _shortcut(target=TARGET):
+    return {"mimeType": drive.SHORTCUT, "shortcutDetails": {"targetId": target}}
+
+
+def test_shortcut_downloads_its_target():
+    client, files = _client(meta=_shortcut(), media=b"%PDF", by_id={
+        TARGET: {"mimeType": "application/pdf", "size": "10"}})
+    assert client.download(f"https://drive.google.com/file/d/{FID}/view") == (
+        b"%PDF", "application/pdf")
+    assert files.calls == [("get", FID), ("get", TARGET), ("media", TARGET)]
+
+
+def test_shortcut_to_google_doc_exports_the_target():
+    client, files = _client(meta=_shortcut(), exported=b"doc text", by_id={
+        TARGET: {"mimeType": "application/vnd.google-apps.document"}})
+    assert client.download(f"https://drive.google.com/file/d/{FID}/view") == (
+        b"doc text", "text/plain")
+    assert files.calls[-1] == ("export", TARGET, "text/plain")
+
+
+def test_shortcut_target_size_is_checked():
+    client, files = _client(meta=_shortcut(), by_id={
+        TARGET: {"mimeType": "application/pdf", "size": str(drive.MAX_BYTES + 1)}})
+    with pytest.raises(ExtractError, match="MB"):
+        client.download(f"https://drive.google.com/file/d/{FID}/view")
+    assert ("media", TARGET) not in files.calls
+
+
+@pytest.mark.parametrize("meta, by_id, match", [
+    ({"mimeType": drive.SHORTCUT}, {}, "no target"),
+    (_shortcut(), {TARGET: _shortcut(FID)}, "another shortcut"),
+    (_shortcut(), {TARGET: {"mimeType": "application/vnd.google-apps.folder"}},
+     "unsupported"),
+])
+def test_broken_shortcuts_fail_permanently(meta, by_id, match):
+    client, _ = _client(meta=meta, by_id=by_id)
+    with pytest.raises(ExtractError, match=match):
+        client.download(f"https://drive.google.com/file/d/{FID}/view")
+
+
+def test_can_read_checks_the_shortcut_target():
+    url = f"https://drive.google.com/file/d/{FID}/view"
+    client, files = _client(meta=_shortcut(), by_id={
+        TARGET: {"mimeType": "application/pdf", "capabilities": {"canDownload": True}}})
+    assert client.can_read(url)
+    assert files.calls == [("get", FID), ("get", TARGET)]
+    # the shortcut itself being downloadable says nothing about the target
+    client, _ = _client(meta={**_shortcut(), "capabilities": {"canDownload": True}},
+                        by_id={TARGET: {"mimeType": "application/pdf",
+                                        "capabilities": {"canDownload": False}}})
+    assert not client.can_read(url)

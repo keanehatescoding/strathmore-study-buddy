@@ -6,6 +6,8 @@ API under the owner's refresh token, which needs the drive.readonly scope
 
 - Binary files (PDF, PPTX, DOCX, text): files.get_media, capped at MAX_BYTES.
 - Google Docs/Slides/Sheets have no bytes: exported to text/plain or CSV.
+- Shortcuts are followed one hop to shortcutDetails.targetId (Drive refuses
+  to create a shortcut to a shortcut); the target's metadata decides.
 - DriveError = worth retrying (no Drive grant yet, network, 5xx): the
   pipeline leaves the resource pending. ExtractError = permanent (gone,
   unsupported type, too large): the resource is marked failed.
@@ -21,6 +23,8 @@ from app.extract import MAX_DOWNLOAD_BYTES, ExtractError
 
 SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 MAX_BYTES = MAX_DOWNLOAD_BYTES
+
+SHORTCUT = "application/vnd.google-apps.shortcut"
 
 # Google-native types -> export mime the extractor reads
 EXPORTS = {
@@ -78,8 +82,7 @@ class DriveClient:
         if fid is None:
             return False
         try:
-            meta = self._call(self.service.files().get(
-                fileId=fid, fields="capabilities/canDownload", supportsAllDrives=True))
+            _, meta = self._resolve(fid, "capabilities/canDownload")
         except (DriveError, ExtractError):
             return False
         return (meta.get("capabilities") or {}).get("canDownload") is True
@@ -90,8 +93,7 @@ class DriveClient:
         if fid is None:
             raise ExtractError(f"not a Drive file URL: {url}")
         files = self.service.files()
-        meta = self._call(files.get(fileId=fid, fields="mimeType,size",
-                                    supportsAllDrives=True))
+        fid, meta = self._resolve(fid, "size")
         mime = meta.get("mimeType") or ""
         if mime in EXPORTS:
             blob = self._call(files.export(fileId=fid, mimeType=EXPORTS[mime]))
@@ -102,6 +104,23 @@ class DriveClient:
             raise ExtractError(f"Drive file is over {MAX_BYTES // (1024 * 1024)} MB")
         blob = self._call(files.get_media(fileId=fid, supportsAllDrives=True))
         return _capped(blob), mime or None
+
+    def _resolve(self, fid: str, fields: str) -> tuple[str, dict]:
+        """(file id, metadata with mimeType + `fields`), following a shortcut
+        to its target. A shortcut costs one extra metadata call."""
+        files = self.service.files()
+        meta = self._call(files.get(fileId=fid, fields=f"mimeType,shortcutDetails,{fields}",
+                                    supportsAllDrives=True))
+        if meta.get("mimeType") != SHORTCUT:
+            return fid, meta
+        target = (meta.get("shortcutDetails") or {}).get("targetId")
+        if not target:
+            raise ExtractError("Drive shortcut has no target")
+        meta = self._call(files.get(fileId=target, fields=f"mimeType,{fields}",
+                                    supportsAllDrives=True))
+        if meta.get("mimeType") == SHORTCUT:
+            raise ExtractError("Drive shortcut points at another shortcut")
+        return target, meta
 
     @staticmethod
     def _call(request):

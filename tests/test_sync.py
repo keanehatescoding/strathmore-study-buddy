@@ -681,3 +681,104 @@ def test_another_users_chunks_dont_count(session, user_id, monkeypatch, llm_key)
     session.commit()
     _sync_job(session, monkeypatch, FakeAdapter())
     assert len(_pipeline_jobs(session)) == 1
+
+
+class _RevokedGrant(FakeAdapter):
+    def fetch_courses(self):
+        from google.auth.exceptions import RefreshError
+
+        raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+
+def _classroom_job(session, monkeypatch, adapter):
+    import app.sync_cli as sync_cli
+    from app.jobs import run_sync_job
+
+    monkeypatch.setattr(sync_cli, "build_adapter", lambda source, user: adapter)
+    return run_sync_job(session, {"source": "classroom", "course_id": None,
+                                  "user_email": "s@x.edu"})
+
+
+def _store_token(session, user_id, token):
+    from app.auth import _REFRESH_PURPOSE
+    from app.crypto import seal
+
+    user = session.get(User, user_id)
+    user.google_refresh_token = seal(_REFRESH_PURPOSE, token)
+    session.add(user)
+    session.commit()
+    return user
+
+
+def test_revoked_grant_forgets_the_token(session, user_id, monkeypatch):
+    from app.auth import refresh_token_for
+    from app.sync_cli import NotConnectedError
+
+    user = _store_token(session, user_id, "DEAD")
+    with pytest.raises(NotConnectedError, match="sign in again"):
+        _classroom_job(session, monkeypatch, _RevokedGrant())
+    session.refresh(user)
+    assert refresh_token_for(user) is None
+
+
+def test_revoked_grant_keeps_a_token_stored_meanwhile(session, user_id):
+    from app.auth import forget_revoked_token, refresh_token_for
+
+    user = _store_token(session, user_id, "FRESH")
+    assert not forget_revoked_token(session, user, "DEAD")
+    assert refresh_token_for(user) == "FRESH"
+
+
+def test_other_refresh_errors_keep_the_token(session, user_id, monkeypatch):
+    from google.auth.exceptions import RefreshError
+
+    from app.auth import refresh_token_for
+
+    class _Scope(FakeAdapter):
+        def fetch_courses(self):
+            raise RefreshError("invalid_scope")
+
+    user = _store_token(session, user_id, "KEEP")
+    with pytest.raises(RefreshError):
+        _classroom_job(session, monkeypatch, _Scope())
+    session.refresh(user)
+    assert refresh_token_for(user) == "KEEP"
+
+
+def test_revoked_grant_mid_sync_still_forgets_the_token(session, user_id, monkeypatch):
+    from google.auth.exceptions import RefreshError
+
+    from app.auth import refresh_token_for
+    from app.sync_cli import NotConnectedError
+
+    class _RevokedTopics(FakeAdapter):
+        def fetch_topics(self, cid):
+            raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    user = _store_token(session, user_id, "DEAD")
+    with pytest.raises(NotConnectedError):
+        _classroom_job(session, monkeypatch, _RevokedTopics())
+    session.refresh(user)
+    assert refresh_token_for(user) is None
+
+
+def test_revoked_grant_keeps_a_token_stored_after_the_read(session, user_id):
+    from sqlmodel import update
+
+    from app.auth import _REFRESH_PURPOSE, forget_revoked_token, refresh_token_for
+    from app.crypto import seal
+
+    user = _store_token(session, user_id, "DEAD")
+    real_refresh = session.refresh
+
+    def refresh_then_sign_in(obj, *a, **k):
+        # a sign-in lands between the comparison's read and the write
+        real_refresh(obj, *a, **k)
+        session.connection().execute(
+            update(User).where(User.id == user_id)
+            .values(google_refresh_token=seal(_REFRESH_PURPOSE, "FRESH")))
+        session.refresh = real_refresh
+
+    session.refresh = refresh_then_sign_in
+    assert not forget_revoked_token(session, user, "DEAD")
+    assert refresh_token_for(user) == "FRESH"

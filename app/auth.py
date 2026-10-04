@@ -146,6 +146,28 @@ def revoke_google_access(session: Session, user: User) -> bool:
     return revoked
 
 
+def forget_revoked_token(session: Session, user: User, token: str) -> bool:
+    """Clear the user's stored refresh token after Google rejected it
+    (invalid_grant: revoked at myaccount.google.com, or expired). Only if
+    it is still `token`: a sign-in may have stored a fresh one meanwhile.
+    With nothing stored, their next sign-in asks for consent again and
+    gets a new token instead of skipping the bounce for a dead one."""
+    session.rollback()
+    session.refresh(user)
+    sealed = user.google_refresh_token
+    if sealed is None or refresh_token_for(user) != token:
+        return False
+    # compare-and-clear in the UPDATE itself: a sign-in that stores a fresh
+    # token between the read above and this write must not be wiped
+    cleared = session.exec(
+        update(User).where(User.id == user.id, User.google_refresh_token == sealed)
+        .values(google_refresh_token=None)
+    ).rowcount
+    session.commit()
+    session.refresh(user)
+    return cleared == 1
+
+
 def find_user(session: Session, email: str) -> User | None:
     """Case-insensitive, so rows stored before normalization still match
     (an exact, already-normalized row wins)."""

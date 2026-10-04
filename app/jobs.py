@@ -312,18 +312,32 @@ def run_due(session: Session, limit: int = 5) -> dict:
 @handler("sync")
 def run_sync_job(session: Session, payload: dict) -> dict:
     """payload: {source, course_id|None, user_email}."""
-    from app.auth import find_user
+    from google.auth.exceptions import RefreshError
+
+    from app.auth import find_user, forget_revoked_token, refresh_token_for
     from app.sync import failed_courses, sync_all, sync_course
-    from app.sync_cli import build_adapter
+    from app.sync_cli import NotConnectedError, build_adapter
 
     user = find_user(session, payload["user_email"])
     if user is None:
         raise ValueError(f"no such user {payload['user_email']}")
     adapter = build_adapter(payload["source"], user)
-    if payload.get("course_id"):
-        stats = sync_course(session, adapter, payload["course_id"], user.id)
-        return {payload["course_id"]: stats.as_dict()}
-    results = sync_all(session, adapter, user.id)
+    try:
+        if payload.get("course_id"):
+            stats = sync_course(session, adapter, payload["course_id"], user.id)
+            return {payload["course_id"]: stats.as_dict()}
+        results = sync_all(session, adapter, user.id)
+    except RefreshError as e:
+        if payload["source"] != "classroom" or "invalid_grant" not in str(e):
+            raise
+        # the grant is gone; retrying can't help, and a stored dead token
+        # would stop the next sign-in from asking for a new one
+        own = refresh_token_for(user)
+        if own:
+            forget_revoked_token(session, user, own)
+        raise NotConnectedError(
+            f"Google rejected {user.email}'s Classroom access (revoked or "
+            "expired); they need to sign in again") from e
     failed = failed_courses(results)
     if results and len(failed) == len(results):
         # nothing synced: fail the job so it retries; a partial sync

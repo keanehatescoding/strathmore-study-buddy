@@ -193,6 +193,35 @@ def test_link_shared_target_sends_its_resource_key(target_meta, last_call):
     assert _key_headers(files) == [None, f"{TARGET}/0-rk", f"{TARGET}/0-rk"]
 
 
+@pytest.mark.parametrize("url, key", [
+    (f"https://drive.google.com/file/d/{FID}/view?usp=sharing&resourcekey=0-abc", "0-abc"),
+    (f"https://drive.google.com/open?id={FID}&resourcekey=0-abc", "0-abc"),
+    (f"https://drive.google.com/file/d/{FID}/view", None),
+    (None, None),
+])
+def test_resource_key_from_url(url, key):
+    assert drive.resource_key(url) == key
+
+
+def test_link_shared_file_url_sends_its_resource_key():
+    url = f"https://drive.google.com/file/d/{FID}/view?resourcekey=0-own"
+    client, files = _client(meta={"mimeType": "application/pdf", "size": "10"},
+                            media=b"%PDF")
+    assert client.download(url) == (b"%PDF", "application/pdf")
+    assert _key_headers(files) == [f"{FID}/0-own", f"{FID}/0-own"]
+
+
+def test_link_shared_shortcut_url_keys_each_file_with_its_own_key():
+    url = f"https://drive.google.com/file/d/{FID}/view?resourcekey=0-own"
+    shortcut = _shortcut()
+    shortcut["shortcutDetails"]["targetResourceKey"] = "0-rk"
+    client, files = _client(meta={**shortcut, "capabilities": {"canDownload": True}},
+                            by_id={TARGET: {"mimeType": "application/pdf",
+                                            "capabilities": {"canDownload": True}}})
+    assert client.can_read(url)
+    assert _key_headers(files) == [f"{FID}/0-own", f"{TARGET}/0-rk"]
+
+
 def test_unkeyed_requests_send_no_resource_key_header():
     client, files = _client(meta=_shortcut(), media=b"%PDF", by_id={
         TARGET: {"mimeType": "application/pdf", "size": "10"}})

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, func, or_, select
 
 from app.chunk import chunk_resource, needs_llm
@@ -354,7 +355,13 @@ def _quiz_failed(session: Session, chunk_id, attempt: int, e: Exception) -> int:
     f.retry_after = _retry_at(f.failures)
     f.error = f"{type(e).__name__}: {e}"[:500]
     session.add(f)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()  # the chunk's foreign key: deleted since the check
+        if session.get(Chunk, chunk_id) is not None:
+            raise
+        return 0
     return f.failures
 
 
@@ -393,8 +400,8 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
             break
         except Exception as e:
             session.rollback()
-            counts["errors"] += 1
             tries = _quiz_failed(session, chunk_id, attempt, e)
+            counts["errors" if tries else "changed"] += 1
             if tries >= MAX_QUIZ_FAILURES:
                 counts["given_up"] += 1
             print(f"  error on chunk {chunk_id} (try {tries}): {str(e)[:120]}",

@@ -910,3 +910,33 @@ def test_resync_purges_quiz_failures(session):
     _purge_derived(session, chunk.resource_id)
     session.commit()
     assert session.exec(select(QuizFailure)).all() == []
+
+
+def test_quiz_failure_on_a_chunk_deleted_meanwhile_is_not_fatal(monkeypatch):
+    from sqlalchemy import event
+
+    from app.models import QuizFailure
+    from app.pipeline import _quiz_failed
+
+    engine = make_engine("sqlite://")
+    if engine.dialect.name == "sqlite":
+        event.listen(engine, "connect",
+                     lambda c, _: c.execute("PRAGMA foreign_keys=ON"))
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        chunk = _quiz_chunk(s)
+        stale, cid = Chunk(**chunk.model_dump()), chunk.id
+        s.delete(chunk)
+        s.commit()
+        real_get = Session.get
+        checked = []
+
+        def get(self, model, key, **kw):  # the resync lands after the check
+            if model is Chunk and not checked:
+                checked.append(key)
+                return stale
+            return real_get(self, model, key, **kw)
+
+        monkeypatch.setattr(Session, "get", get)
+        assert _quiz_failed(s, cid, 1, RuntimeError("bad reply")) == 0
+        assert s.exec(select(QuizFailure)).all() == []

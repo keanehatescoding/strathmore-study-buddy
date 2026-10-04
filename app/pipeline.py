@@ -7,6 +7,8 @@ Chunking needs LLM_* in .env; extraction runs without it.
 A resource whose download or chunking fails is deferred with exponential
 backoff (Resource.attempts / retry_after, 1h doubling to 24h) rather than
 retried on every run; chunking gives up ("failed") after MAX_CHUNK_ATTEMPTS.
+Quiz generation backs off the same way per (chunk, attempt) in QuizFailure
+and gives up on a chunk after MAX_QUIZ_FAILURES.
 
 Each stage first copies another user's results for the same material
 (app.share), counted as "shared", and only then downloads or calls the LLM.
@@ -23,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
-from sqlmodel import Session, func, or_, select
+from sqlmodel import Session, delete, func, or_, select
 
 from app.chunk import chunk_resource, needs_llm
 from app.config import settings
@@ -31,7 +33,7 @@ from app.db import engine
 from app.drive import DriveError
 from app.extract import ExtractError, SkipResource, extract_resource_text
 from app.llm import QuotaExhaustedError
-from app.models import Chunk, Course, QuizAttempt, Resource, Topic, User
+from app.models import Chunk, Course, QuizAttempt, QuizFailure, Resource, Topic, User
 from app.moodle import ForeignURLError, MoodleError
 from app.quiz import generate_for_chunk
 from app.share import copy_chunks, copy_extraction, copy_quiz
@@ -65,6 +67,7 @@ def _scoped(q, course_id, source):
 
 
 MAX_CHUNK_ATTEMPTS = 3
+MAX_QUIZ_FAILURES = 3
 RETRY_BASE = timedelta(hours=1)
 RETRY_CAP = timedelta(hours=24)
 
@@ -73,10 +76,15 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _retry_at(tries: int) -> datetime:
+    """When to try again after `tries` failures in a row: 1h, 2h, 4h ... 24h."""
+    return _now() + min(RETRY_BASE * 2 ** (tries - 1), RETRY_CAP)
+
+
 def _defer(r: Resource, error: str) -> None:
-    """Count a failed try and push the next one out: 1h, 2h, 4h ... 24h."""
+    """Count a failed try and push the next one out."""
     r.attempts = (r.attempts or 0) + 1
-    r.retry_after = _now() + min(RETRY_BASE * 2 ** (r.attempts - 1), RETRY_CAP)
+    r.retry_after = _retry_at(r.attempts)
     r.error = error[:500]
 
 
@@ -107,12 +115,17 @@ def chunkable_resource_ids(session: Session, course_id=None, source=None) -> lis
 def quiz_chunk_ids(session: Session, course_id=None, source=None,
                    attempt: int | None = None) -> list:
     """Chunk ids in scope; with `attempt`, only those with no QuizAttempt for
-    it yet, found in one query rather than a lookup per chunk."""
+    it yet and not backed off or given up after failures, found in one query
+    rather than a lookup per chunk."""
     q = (select(Chunk.id).join(Resource, Resource.id == Chunk.resource_id)
          .order_by(Chunk.resource_id, Chunk.order))
     if attempt is not None:
         q = q.where(~select(QuizAttempt.chunk_id).where(
             QuizAttempt.chunk_id == Chunk.id, QuizAttempt.attempt == attempt
+        ).exists(), ~select(QuizFailure.chunk_id).where(
+            QuizFailure.chunk_id == Chunk.id, QuizFailure.attempt == attempt,
+            or_(QuizFailure.failures >= MAX_QUIZ_FAILURES,
+                QuizFailure.retry_after > _now()),
         ).exists())
     return session.exec(_scoped(q, course_id, source)).all()
 
@@ -330,6 +343,21 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
     return result
 
 
+def _quiz_failed(session: Session, chunk_id, attempt: int, e: Exception) -> int:
+    """Record a failed generation and back the chunk off; returns the failure
+    count (0 when the chunk is gone, e.g. dropped by a resync meanwhile)."""
+    if session.get(Chunk, chunk_id) is None:
+        return 0
+    f = session.get(QuizFailure, (chunk_id, attempt)) or QuizFailure(
+        chunk_id=chunk_id, attempt=attempt)
+    f.failures += 1
+    f.retry_after = _retry_at(f.failures)
+    f.error = f"{type(e).__name__}: {e}"[:500]
+    session.add(f)
+    session.commit()
+    return f.failures
+
+
 def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
              pace: float = 0.0, source=None) -> StageResult:
     from uuid import UUID
@@ -346,12 +374,17 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
     )).one() - len(ids)
     for chunk_id in ids:
         chunk = session.get(Chunk, chunk_id)
+        if chunk is None:
+            counts["changed"] += 1  # dropped by a resync since it was listed
+            continue
+        called = False
         try:
             items = copy_quiz(session, chunk, attempt)
             shared = items is not None
             if shared:
                 counts["shared"] += 1
             else:
+                called = True
                 items = generate_for_chunk(session, chunk, llm, attempt)
         except QuotaExhaustedError as e:
             print(f"  quota exhausted, stopping run (resumable): {str(e)[:120]}",
@@ -361,8 +394,18 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
         except Exception as e:
             session.rollback()
             counts["errors"] += 1
-            print(f"  error on chunk {chunk_id}: {str(e)[:120]}", flush=True)
+            tries = _quiz_failed(session, chunk_id, attempt, e)
+            if tries >= MAX_QUIZ_FAILURES:
+                counts["given_up"] += 1
+            print(f"  error on chunk {chunk_id} (try {tries}): {str(e)[:120]}",
+                  flush=True)
+            if pace and called:
+                time.sleep(pace)  # a failed call is still a request to pace
             continue
+        if session.get(QuizFailure, (chunk_id, attempt)) is not None:
+            session.exec(delete(QuizFailure).where(
+                QuizFailure.chunk_id == chunk_id, QuizFailure.attempt == attempt))
+            session.commit()
         counts["items"] += len(items)
         counts["chunks"] += 1
         print(f"  +{len(items)} items ({counts['chunks']}/{len(ids)} chunks)",

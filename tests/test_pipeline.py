@@ -813,3 +813,100 @@ def test_quiz_candidates_exclude_attempted_chunks(session):
     assert quiz_chunk_ids(session, attempt=1) == [chunks[1].id, chunks[2].id]
     assert quiz_chunk_ids(session, attempt=2) == [chunks[0].id, chunks[2].id]
     assert len(quiz_chunk_ids(session)) == 3
+
+
+class FlakyQuizLLM:
+    """Fails the first `fail` calls (an unparseable reply), then succeeds."""
+
+    def __init__(self, fail):
+        self.fail, self.calls = fail, 0
+
+    def complete_json(self, system, user, **kw):
+        self.calls += 1
+        if self.calls <= self.fail:
+            from app.llm import LLMError
+
+            raise LLMError("reply was not valid JSON")
+        return {"items": [{"question": "Q?", "question_type": "short_answer",
+                           "correct_answer": "A", "grading_criteria": "A",
+                           "difficulty": "recall"}]}
+
+
+def _quiz_chunk(session):
+    r = _resource(session, source_id="qf", status="extracted", extracted_text="t")
+    chunk = Chunk(resource_id=r.id, title="c", content="t", order=0)
+    session.add(chunk)
+    session.commit()
+    return chunk
+
+
+def _expire_backoff(session, chunk):
+    from datetime import datetime, timezone
+
+    from app.models import QuizFailure
+
+    session.exec(update(QuizFailure).where(QuizFailure.chunk_id == chunk.id)
+                 .values(retry_after=datetime(2000, 1, 1, tzinfo=timezone.utc)))
+    session.commit()
+
+
+def test_failed_quiz_generation_backs_off_then_gives_up(session):
+    from app.models import QuizFailure
+    from app.pipeline import MAX_QUIZ_FAILURES, run_quiz
+
+    chunk = _quiz_chunk(session)
+    llm = FlakyQuizLLM(fail=99)
+    assert run_quiz(session, llm).counts["errors"] == 1
+    f = session.get(QuizFailure, (chunk.id, 1))
+    assert f.failures == 1 and f.retry_after is not None and f.error.startswith("LLMError")
+    # backed off: the next run doesn't call the LLM again
+    assert quiz_chunk_ids(session, attempt=1) == []
+    run_quiz(session, llm)
+    assert llm.calls == 1
+    for _ in range(MAX_QUIZ_FAILURES - 1):
+        _expire_backoff(session, chunk)
+        res = run_quiz(session, llm)
+    assert llm.calls == MAX_QUIZ_FAILURES and res.counts["given_up"] == 1
+    _expire_backoff(session, chunk)  # given up even once the backoff is over
+    assert quiz_chunk_ids(session, attempt=1) == []
+    # another attempt number is tracked separately
+    assert quiz_chunk_ids(session, attempt=2) == [chunk.id]
+
+
+def test_quiz_success_after_failure_clears_the_backoff(session):
+    from app.models import QuizAttempt, QuizFailure
+    from app.pipeline import run_quiz
+
+    chunk = _quiz_chunk(session)
+    llm = FlakyQuizLLM(fail=1)
+    run_quiz(session, llm)
+    _expire_backoff(session, chunk)
+    assert run_quiz(session, llm).counts["items"] == 1
+    session.expire_all()
+    assert session.get(QuizFailure, (chunk.id, 1)) is None
+    assert session.get(QuizAttempt, (chunk.id, 1)) is not None
+
+
+def test_quiz_paces_after_failed_calls(session, monkeypatch):
+    from app.pipeline import run_quiz
+
+    for i in range(2):
+        r = _resource(session, source_id=f"p{i}", status="extracted", extracted_text="t")
+        session.add(Chunk(resource_id=r.id, title="c", content=f"t{i}", order=0))
+    session.commit()
+    slept = []
+    monkeypatch.setattr("app.pipeline.time.sleep", slept.append)
+    assert run_quiz(session, FlakyQuizLLM(fail=99), pace=2.5).counts["errors"] == 2
+    assert slept == [2.5, 2.5]
+
+
+def test_resync_purges_quiz_failures(session):
+    from app.models import QuizFailure
+    from app.pipeline import run_quiz
+    from app.sync import _purge_derived
+
+    chunk = _quiz_chunk(session)
+    run_quiz(session, FlakyQuizLLM(fail=99))
+    _purge_derived(session, chunk.resource_id)
+    session.commit()
+    assert session.exec(select(QuizFailure)).all() == []

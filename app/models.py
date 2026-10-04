@@ -122,6 +122,23 @@ class QuizAttempt(SQLModel, table=True):
     attempt: int = Field(primary_key=True)
 
 
+class QuizFailure(SQLModel, table=True):
+    """Consecutive failed generations for (chunk, attempt) and when the next
+    may run, so a chunk the LLM can't quiz isn't re-billed on every run.
+    Deleted on success; at MAX_QUIZ_FAILURES the chunk is given up on."""
+
+    __tablename__ = "quiz_failures"
+
+    chunk_id: uuid.UUID = Field(foreign_key="chunks.id", primary_key=True,
+                                ondelete="CASCADE")
+    attempt: int = Field(primary_key=True)
+    failures: int = Field(default=0)
+    retry_after: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    error: Optional[str] = Field(default=None)
+
+
 class QuizItem(SQLModel, table=True):
     __tablename__ = "quiz_items"
     __table_args__ = (UniqueConstraint("generation_key", name="uq_quiz_items_gen_key"),)

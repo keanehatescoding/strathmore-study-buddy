@@ -25,6 +25,7 @@ from app.models import (
     Chunk,
     Course,
     QuizAttempt,
+    QuizFailure,
     QuizItem,
     Resource,
     ReviewState,
@@ -190,6 +191,7 @@ def _purge_derived(session: Session, resource_id) -> None:
     session.exec(delete(ReviewState).where(ReviewState.quiz_item_id.in_(item_ids)))
     session.exec(delete(QuizItem).where(QuizItem.chunk_id.in_(chunk_ids)))
     session.exec(delete(QuizAttempt).where(QuizAttempt.chunk_id.in_(chunk_ids)))
+    session.exec(delete(QuizFailure).where(QuizFailure.chunk_id.in_(chunk_ids)))
     session.exec(delete(Chunk).where(Chunk.resource_id == resource_id))
 
 

@@ -243,7 +243,7 @@ def test_cross_user_isolation(testapp):
 
 
 def _callback_client(email: str, monkeypatch, **session_data):
-    """TestClient with a signed session holding oauth_state + mocked Google."""
+    """TestClient with a signed session holding a pending state "s1" + mocked Google."""
     from fastapi.testclient import TestClient
     from sqlalchemy.pool import StaticPool
     from sqlmodel import Session, SQLModel
@@ -268,7 +268,7 @@ def _callback_client(email: str, monkeypatch, **session_data):
     )
     monkeypatch.setattr(auth_mod, "fetch_email", lambda tok: email)
     client = TestClient(app, follow_redirects=False)
-    _set_session_cookie(client, _signed_session({"oauth_state": "s1", **session_data}))
+    _set_session_cookie(client, _signed_session({"oauth_states": {"s1": False}, **session_data}))
     return client
 
 
@@ -371,7 +371,67 @@ def test_login_google_starts_with_account_chooser():
     client = TestClient(app, follow_redirects=False)
     r = client.get("/login/google")
     assert r.status_code == 303 and "prompt=select_account" in r.headers["location"]
-    assert _session_data(client)["oauth_consent"] is False
+    assert list(_session_data(client)["oauth_states"].values()) == [False]
+
+
+def _state_of(location: str) -> str:
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(location).query)["state"][0]
+
+
+def test_double_tapped_sign_in_accepts_either_callback(monkeypatch):
+    monkeypatch.setattr(settings, "allowed_emails", "")
+    client = _callback_client("tap@x.edu", monkeypatch)
+    try:
+        first = _state_of(client.get("/login/google").headers["location"])
+        second = _state_of(client.get("/login/google").headers["location"])
+        assert first != second
+        # Google returns the first tap; the second is still at Google
+        r = client.get("/auth/callback", params={"code": "c", "state": first})
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        data = _session_data(client)
+        assert "user_id" in data and second in data["oauth_states"]
+        assert first not in data["oauth_states"]
+        # the second lands too, and signs in afresh
+        r = client.get("/auth/callback", params={"code": "c2", "state": second})
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        assert _session_data(client)["oauth_states"] == {"s1": False}
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_oauth_state_is_single_use(monkeypatch):
+    monkeypatch.setattr(settings, "allowed_emails", "")
+    client = _callback_client("once@x.edu", monkeypatch)
+    try:
+        assert client.get("/auth/callback", params={"code": "c", "state": "s1"}).status_code == 303
+        replay = TestClient(app, follow_redirects=False)
+        _set_session_cookie(replay, _signed_session({"oauth_states": {}}))
+        r = replay.get("/auth/callback", params={"code": "c", "state": "s1"})
+        _assert_login_failed(replay, r, "sign-in link expired")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stale_callback_after_sign_in_goes_home(monkeypatch):
+    monkeypatch.setattr(settings, "allowed_emails", "")
+    client = _callback_client("home@x.edu", monkeypatch)
+    try:
+        client.get("/auth/callback", params={"code": "c", "state": "s1"})
+        r = client.get("/auth/callback", params={"code": "c", "state": "s1"})
+        assert r.status_code == 303 and r.headers["location"] == "/"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_pending_oauth_states_are_bounded():
+    from app.main import MAX_PENDING_OAUTH
+
+    client = TestClient(app, follow_redirects=False)
+    states = [_state_of(client.get("/login/google").headers["location"])
+              for _ in range(MAX_PENDING_OAUTH + 2)]
+    assert list(_session_data(client)["oauth_states"]) == states[-MAX_PENDING_OAUTH:]
 
 
 def _no_refresh_token(monkeypatch):
@@ -406,9 +466,9 @@ def test_missing_refresh_token_reprompts_with_consent_once(monkeypatch):
         assert r.status_code == 303 and loc.startswith(auth_mod.AUTH_URL)
         assert "prompt=consent" in loc and "login_hint=new%40x.edu" in loc
         data = _session_data(client)
-        assert "user_id" not in data and data["oauth_consent"] is True
+        state = _state_of(loc)
+        assert "user_id" not in data and data["oauth_states"] == {state: True}
         # the consent round still came back without one: sign in anyway
-        state = data["oauth_state"]
         r = client.get("/auth/callback", params={"code": "c2", "state": state})
         assert r.status_code == 303 and r.headers["location"] == "/"
         assert "user_id" in _session_data(client)
@@ -561,7 +621,7 @@ def test_logout_revokes_copies_of_the_session(monkeypatch):
         _set_session_cookie(thief, stolen)
         assert thief.get("/").headers["location"] == "/login"
         # signed in again; the dead copy must not be able to keep revoking
-        _set_session_cookie(client, _signed_session({"oauth_state": "s1"}))
+        _set_session_cookie(client, _signed_session({"oauth_states": {"s1": False}}))
         r = client.get("/auth/callback", params={"code": "c", "state": "s1"})
         assert r.status_code == 303 and client.get("/").status_code == 200
         _set_session_cookie(thief, stolen)

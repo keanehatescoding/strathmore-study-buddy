@@ -16,13 +16,16 @@
    | Service | Start command | Schedule |
    |---|---|---|
    | `web` | `Procfile` / `Dockerfile` default | always on |
-   | `worker` | `alembic upgrade head && python -m app.worker --loop 3600` | always on |
+   | `worker` | `alembic upgrade head && python -m app.worker --loop 60` | always on |
    | `sync-cron` | step 5 | `0 3 * * *` |
    | `pipeline-cron` | step 6 | `0 6 * * *` |
 
-   The worker drains the job queue hourly: queued syncs (sign-in, the Sync
-   button), the notification pass, and a first pipeline run for each new
-   user (see below). The worker needs `LLM_*` for that run, including
+   The worker polls the job queue every minute, so a sync queued at sign-in
+   or by the Sync button starts within a minute, as does the first pipeline
+   run for each new user (see below). The notification pass over all users
+   stays hourly: the worker queues it only when the last one is an hour old
+   (`--notify-every SECONDS` changes that; the default is 3600 with
+   `--loop`). The worker needs `LLM_*` for that run, including
    `LLM_PACE` (e.g. `45` on the free Gemini tier, matching `pipeline-cron`'s
    `--pace`); without `LLM_API_KEY` no such run is queued and new users wait
    for `pipeline-cron`. Every service starts with `alembic
@@ -48,6 +51,10 @@
    ```
    alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && python -m app.worker
    ```
+   This single pass has no `--notify-every` on purpose: it always runs a
+   notification pass, so the nightly sync's new material goes out right
+   away rather than at the persistent worker's next hourly pass. Events are
+   marked once sent, so the extra pass never emails anyone twice.
    Signing in with Google also queues a Classroom sync for that user. Users
    who signed in before Drive access was requested must sign in once more;
    until then their Drive files stay pending. Likewise, Classroom
@@ -172,7 +179,8 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   15 minutes per account and per Moodle username, so it can't be used to
   guess another student's password. Like the POST limit, it is per-process.
 - Cron observability: set `HEALTHCHECK_PING_URL` (e.g. a healthchecks.io
-  check) — the worker pings it after every pass, and pings `<url>/fail`
+  check) — the worker pings it after every pass (every minute with
+  `--loop 60`, so a period of a few minutes works), and pings `<url>/fail`
   when a job failed for good or the pass itself crashed, so a 6am failure
   pages you instead of showing up as missing quizzes. With `--loop`, a
   crashed pass (e.g. Postgres restarting) is logged and retried next

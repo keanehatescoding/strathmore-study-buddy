@@ -196,6 +196,26 @@ def test_worker_skips_enqueue_when_notify_already_queued(worker_engine, monkeypa
         assert len(s.exec(select(Job)).all()) == 1
 
 
+def test_worker_throttles_notify_job_to_notify_every(worker_engine, monkeypatch):
+    calls: list = []
+    monkeypatch.setitem(HANDLERS, "send_notifications", lambda s, p: calls.append(1))
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: None)
+    hour = timedelta(hours=1)
+    worker.run_once(hour)  # no notify job yet: queue one
+    assert calls == [1]
+    with Session(worker_engine) as s:
+        enqueue(s, "fake", {})  # a sign-in sync between polls
+    out = worker.run_once(hour)
+    assert out["completed"] == 1 and calls == [1]  # sync ran, no second scan
+    with Session(worker_engine) as s:
+        job = s.exec(select(Job).where(Job.type == "send_notifications")).one()
+        job.created_at = datetime.now(timezone.utc) - hour - timedelta(seconds=1)
+        s.add(job)
+        s.commit()
+    worker.run_once(hour)  # the last one is over an hour old
+    assert calls == [1, 1]
+
+
 def test_due_sync_claimed_before_earlier_notify(session, fake_handler, monkeypatch):
     order: list = []
     monkeypatch.setitem(HANDLERS, "send_notifications", lambda s, p: order.append("notify"))
@@ -409,7 +429,7 @@ def _main(monkeypatch, *argv):
 def test_loop_survives_a_failed_pass(monkeypatch):
     calls: list = []
 
-    def run_once():
+    def run_once(notify_every=None):
         calls.append(1)
         if len(calls) == 1:
             raise ConnectionError("postgres restarting")
@@ -422,8 +442,23 @@ def test_loop_survives_a_failed_pass(monkeypatch):
     assert len(calls) == 3
 
 
+def test_loop_defaults_to_hourly_notify(monkeypatch):
+    seen: list = []
+
+    def run_once(notify_every=None):
+        seen.append(notify_every)
+        jobs.STOP.set()
+        return {}
+
+    monkeypatch.setattr(worker, "run_once", run_once)
+    _main(monkeypatch, "--loop", "60")
+    _main(monkeypatch)  # a single (cron) pass always notifies
+    _main(monkeypatch, "--loop", "60", "--notify-every", "600")
+    assert seen == [timedelta(hours=1), None, timedelta(minutes=10)]
+
+
 def test_single_pass_still_raises(monkeypatch):
-    def run_once():
+    def run_once(notify_every=None):
         raise ConnectionError("postgres restarting")
 
     monkeypatch.setattr(worker, "run_once", run_once)
@@ -432,7 +467,7 @@ def test_single_pass_still_raises(monkeypatch):
 
 
 def test_main_exits_cleanly_when_a_job_is_interrupted(monkeypatch):
-    def run_once():
+    def run_once(notify_every=None):
         jobs.STOP.set()
         raise Shutdown("SIGTERM")
 

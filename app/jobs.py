@@ -315,6 +315,8 @@ def run_sync_job(session: Session, payload: dict) -> dict:
     from google.auth.exceptions import RefreshError
 
     from app.auth import find_user, forget_revoked_token, refresh_token_for
+    from app.moodle import TokenRejected
+    from app.moodle_tokens import decrypt_token, forget_rejected_token
     from app.sync import failed_courses, sync_all, sync_course
     from app.sync_cli import NotConnectedError, build_adapter
 
@@ -327,6 +329,17 @@ def run_sync_job(session: Session, payload: dict) -> dict:
             stats = sync_course(session, adapter, payload["course_id"], user.id)
             return {payload["course_id"]: stats.as_dict()}
         results = sync_all(session, adapter, user.id)
+    except TokenRejected as e:
+        # like a revoked Google grant: clear the dead key so Settings asks
+        # them to reconnect, instead of failing every daily sync unseen
+        own = decrypt_token(user.moodle_token)
+        if own is None:
+            raise NotConnectedError(
+                "Moodle rejected the shared MOODLE_TOKEN; replace it") from e
+        forget_rejected_token(session, user, own)
+        raise NotConnectedError(
+            f"Moodle rejected {user.email}'s key (expired or revoked); "
+            "they need to reconnect in Settings") from e
     except RefreshError as e:
         if payload["source"] != "classroom" or "invalid_grant" not in str(e):
             raise

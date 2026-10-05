@@ -300,3 +300,14 @@ def test_unowned_shared_token_warns():
 
     with pytest.warns(UserWarning, match="MOODLE_TOKEN_OWNER"):
         Settings(_env_file=None, moodle_token="T", moodle_token_owner="")
+
+
+def test_settings_page_explains_a_rejected_key(testapp):
+    with testapp["Session"]() as s:
+        user = s.get(User, testapp["user_id"])
+        user.moodle_token = moodle_tokens.REJECTED
+        s.add(user)
+        s.commit()
+    page = testapp["client"].get("/settings/moodle")
+    assert "Not connected" in page.text
+    assert "Moodle stopped accepting your saved key" in page.text

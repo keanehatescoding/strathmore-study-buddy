@@ -33,6 +33,8 @@
     </form>
   {% elif shared %}
     <p class="settings-text">You're using the app's shared Moodle key. Connect your own account below so syncs run as you.</p>
+  {% elif rejected %}
+    <p class="settings-text">Moodle stopped accepting your saved key (it expired or was revoked), so your courses aren't syncing. Connect again below.</p>
   {% elif stale %}
     <p class="settings-text">Your saved key can't be read any more. Connect again below.</p>
   {% else %}

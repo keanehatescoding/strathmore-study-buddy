@@ -1,6 +1,8 @@
 import hmac
+import logging
 import secrets
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -22,7 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import auth as auth_mod
-from app.config import settings
+from app.config import running_commit, settings
 from app.db import get_session
 from app.grade import (
     MAX_ANSWER_CHARS,
@@ -49,7 +51,18 @@ from app.models import (
 from app.security import RateLimitMiddleware, SecurityHeadersMiddleware, hit_table
 from app.stats import compute_stats
 
-app = FastAPI(title="Strathmore Study Buddy")
+log = logging.getLogger("uvicorn.error")  # uvicorn configures this one
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # A lost deploy trigger once left the web service weeks behind unnoticed;
+    # the commit in the deploy log (and /version) makes drift visible.
+    log.info("starting web at commit %s", running_commit())
+    yield
+
+
+app = FastAPI(title="Strathmore Study Buddy", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 
 ERROR_MESSAGES = {
@@ -219,6 +232,12 @@ def health(session: Session = Depends(get_session)):
             {"status": "degraded", "db": "unreachable"}, status_code=503
         )
     return {"status": "ok"}
+
+
+@app.get("/version")
+def version():
+    # Compare with `git rev-parse origin/master` to spot a stale deploy.
+    return {"commit": running_commit()}
 
 
 @app.get("/login", response_class=HTMLResponse)

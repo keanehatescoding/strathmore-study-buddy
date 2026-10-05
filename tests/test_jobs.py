@@ -457,6 +457,14 @@ def test_loop_defaults_to_hourly_notify(monkeypatch):
     assert seen == [timedelta(hours=1), None, timedelta(minutes=10)]
 
 
+def test_main_logs_the_commit(monkeypatch, caplog):
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "8490f56abc")
+    monkeypatch.setattr(worker, "run_once", lambda notify_every=None: {})
+    with caplog.at_level("INFO", logger="app.worker"):
+        _main(monkeypatch)
+    assert "starting worker at commit 8490f56abc" in caplog.text
+
+
 def test_single_pass_still_raises(monkeypatch):
     def run_once(notify_every=None):
         raise ConnectionError("postgres restarting")

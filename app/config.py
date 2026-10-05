@@ -100,3 +100,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def running_commit() -> str:
+    """The git commit this process was deployed from. Railway sets it on
+    GitHub-triggered deploys; a `railway up` or local run reports "unknown"."""
+    return os.environ.get("RAILWAY_GIT_COMMIT_SHA", "").strip() or "unknown"

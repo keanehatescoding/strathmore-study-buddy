@@ -165,6 +165,11 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   from the image with `--no-healthcheck`, since they serve no HTTP.
 - `/health` checks Postgres and returns 503 when unreachable — safe to use
   for platform restart decisions.
+- `/version` returns `{"commit": "<sha>"}` from Railway's
+  `RAILWAY_GIT_COMMIT_SHA`, and the web and worker processes log it at
+  startup ("starting web at commit …"). After a merge, compare it with
+  `git rev-parse origin/master` to catch a service whose deploy trigger was
+  lost. A `railway up` deploy carries no commit and reports `"unknown"`.
 - Sign-in is limited by `ALLOWED_EMAILS` (default `@strathmore.edu`): a
   comma-separated mix of exact addresses and `@domain` entries. Anyone else
   is sent back to `/login` with an explanation. Set it to your address for

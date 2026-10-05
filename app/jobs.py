@@ -13,13 +13,16 @@ instead of blocking the CLI caller.
   RUNNING_TIMEOUT (its worker died) is reaped back to pending, or to failed
   once its attempts are used up. `attempts` doubles as the claim token, so a
   worker whose claim was reaped and re-taken can't record its result.
-- send_notifications is only claimed once no other job is running or due,
-  on any worker, so it never notifies about half-synced data.
+- send_notifications is only claimed once no sync is running or due, on
+  any worker, so it never notifies about half-synced data. A pipeline job
+  doesn't hold it back: it runs for hours and only ever adds material.
 - A worker told to stop (SIGTERM on redeploy) raises Shutdown into the
   running handler; the job goes straight back to pending with its attempt
   refunded, instead of waiting out the lease and burning a retry.
 - A handler that can't run yet raises Defer: the job goes back to pending
-  for a while with its attempt refunded.
+  for a while with its attempt refunded. Claims go by available_at, so a
+  job deferred by 0 (a pipeline job out of its time slice) lines up behind
+  everything already due.
 - prune_finished() deletes completed/failed jobs past their retention.
 - Job types: "sync" (Moodle/Classroom course sync), "pipeline" (extract,
   chunk and quiz one user's courses after their first sync, so they needn't
@@ -47,6 +50,9 @@ RUNNING_TIMEOUT = timedelta(minutes=10)
 
 # A pipeline job that finds another run of its source going waits this long.
 PIPELINE_BUSY_RETRY = timedelta(minutes=30)
+# A pipeline job runs this long (plus the item in hand), then goes to the
+# back of the queue, so sign-in syncs and notifications don't wait hours.
+PIPELINE_SLICE = timedelta(minutes=10)
 
 
 class Defer(Exception):
@@ -201,7 +207,7 @@ def _claim_next(session: Session) -> Job | None:
     # A job is pending-and-due or running at every instant (the claim flips
     # it in one commit), so this can't miss a sync another worker is taking.
     busy = exists().where(
-        other.type != "send_notifications",
+        other.type.not_in(("send_notifications", "pipeline")),
         or_(
             other.status == "running",
             and_(other.status == "pending", other.available_at <= now),
@@ -213,7 +219,8 @@ def _claim_next(session: Session) -> Job | None:
             Job.status == "pending", Job.available_at <= now,
             or_(Job.type != "send_notifications", ~busy),
         )
-        .order_by(Job.created_at)
+        # available_at first: a handed-back job goes behind those already due
+        .order_by(Job.available_at, Job.created_at)
         .limit(1)
         .with_for_update(skip_locked=True)
     ).first()
@@ -386,8 +393,12 @@ def run_sync_job(session: Session, payload: dict) -> dict:
 def run_pipeline_job(session: Session, payload: dict) -> dict:
     """payload: {source, user_email}. Extract, chunk and quiz the user's
     `source` courses, paced by LLM_PACE. Waits (Defer) while another run of
-    the source, e.g. the pipeline cron, holds its lock. Quota running out
-    ends the job early; the next cron run resumes where it stopped."""
+    the source, e.g. the pipeline cron, holds its lock. After PIPELINE_SLICE
+    it stops between items and hands itself back (Defer(0)) to resume
+    behind the other due jobs. Quota running out ends the job early; the
+    next cron run resumes where it stopped."""
+    import time
+
     from app.auth import find_user
     from app.config import settings
     from app.pipeline import llm_clients, run_course, single_run
@@ -402,12 +413,15 @@ def run_pipeline_job(session: Session, payload: dict) -> dict:
     ).all()
     chunk_llm, quiz_llm = llm_clients()
     out: dict = {}
+    deadline = time.monotonic() + PIPELINE_SLICE.total_seconds()
     with single_run(source, session.get_bind()) as got:
         if not got:
             raise Defer(PIPELINE_BUSY_RETRY, f"another {source} pipeline run is in progress")
         for course_id in course_ids:
             stages = run_course(session, source, course_id, chunk_llm, quiz_llm,
-                                pace=settings.llm_pace)
+                                pace=settings.llm_pace, deadline=deadline)
+            if any(r.out_of_time for r in stages.values()):
+                raise Defer(timedelta(0), "time slice used up; resuming after other jobs")
             out[str(course_id)] = {
                 name: {**r.counts, **({"quota_exhausted": True} if r.quota_exhausted else {})}
                 for name, r in stages.items()

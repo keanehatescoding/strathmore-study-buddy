@@ -84,11 +84,27 @@
   {% else %}
   <div class="empty-state grid-span-all">
     <div class="empty-icon">📚</div>
-    <h3 class="empty-title">No courses synced yet</h3>
+    {% if sync_state == "syncing" %}
+    <h3 class="empty-title">Your courses are syncing</h3>
+    <p class="empty-text">This page fills in within a few minutes. Refresh to check.</p>
+    {% elif sync_state == "disconnected" %}
+    <h3 class="empty-title">No account connected</h3>
     <p class="empty-text">
-      Pull your courses and materials from Strathmore Moodle or Google Classroom by running the sync CLI:
+      <a href="/settings/moodle">Connect Strathmore Moodle in Settings</a>, or sign out and
+      sign in with Google again to bring in your Google Classroom courses.
     </p>
-    <code>python -m app.sync_cli --source moodle</code>
+    {% elif sync_state == "failed" %}
+    <h3 class="empty-title">Your last sync failed</h3>
+    <p class="empty-text">
+      Check your connections in <a href="/settings/moodle">Settings</a>. You may need to reconnect.
+    </p>
+    {% else %}
+    <h3 class="empty-title">No courses found</h3>
+    <p class="empty-text">
+      Your connected accounts have no courses yet. Enrol on Moodle or Classroom, or check your
+      connections in <a href="/settings/moodle">Settings</a>.
+    </p>
+    {% endif %}
   </div>
   {% endfor %}
 </div>

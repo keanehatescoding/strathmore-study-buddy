@@ -590,3 +590,49 @@ def test_pipeline_job_defers_behind_a_real_pipeline_lock(session, pipeline_user,
         assert run_due(session)["deferred"] == 1
     _set(session, session.get(Job, job.id), available_at=datetime.now(timezone.utc))
     assert run_due(session)["completed"] == 1  # lock released: it runs
+
+
+@pytest.mark.parametrize("setup, title", [
+    ("none", "No account connected"),
+    ("pending", "Your courses are syncing"),
+    ("running", "Your courses are syncing"),
+    ("failed", "Your last sync failed"),
+    ("completed", "No courses found"),
+    ("other_user_pending", "No account connected"),
+])
+def test_empty_course_list_explains_why(testapp, monkeypatch, setup, title):
+    from app.config import settings
+    from app.models import Course, User
+    from app.moodle_tokens import REJECTED, encrypt_token
+
+    monkeypatch.setattr(settings, "moodle_token", "")
+    monkeypatch.setattr(settings, "google_refresh_token", "")
+    with testapp["Session"]() as s:
+        user = s.get(User, testapp["user_id"])
+        if setup in ("failed", "completed"):
+            user.moodle_token = encrypt_token("key")
+            s.add(user)
+        if setup in ("pending", "running", "failed", "completed"):
+            s.add(Job(type="sync", status=setup,
+                      payload={"source": "moodle", "user_email": user.email}))
+        if setup == "failed":  # an older success doesn't hide the latest failure
+            s.add(Job(type="sync", status="completed",
+                      updated_at=datetime.now(timezone.utc) - timedelta(days=1),
+                      payload={"source": "moodle", "user_email": user.email}))
+        if setup == "other_user_pending":
+            user.moodle_token = REJECTED  # a dead key counts as not connected
+            s.add(user)
+            s.add(Job(type="sync", status="pending",
+                      payload={"source": "moodle", "user_email": "someone@x.edu"}))
+        s.commit()
+    page = testapp["client"].get("/").text
+    assert title in page
+    assert "sync_cli" not in page
+    if setup in ("none", "failed", "other_user_pending"):
+        assert 'href="/settings/moodle"' in page
+
+    with testapp["Session"]() as s:  # with courses, none of it shows
+        s.add(Course(user_id=testapp["user_id"], source="moodle", source_id="c1", name="Maths"))
+        s.commit()
+    page = testapp["client"].get("/").text
+    assert "Maths" in page and title not in page

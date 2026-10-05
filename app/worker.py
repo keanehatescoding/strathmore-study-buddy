@@ -27,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app import jobs
-from app.config import settings
+from app.config import running_commit, settings
 from app.db import engine
 from app.jobs import Shutdown, enqueue, prune_finished, reap_stale, run_due
 from app.models import Job
@@ -119,6 +119,7 @@ def main() -> None:
     notify_every = timedelta(seconds=notify_secs) if notify_secs else None
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    log.info("starting worker at commit %s", running_commit())
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
     try:

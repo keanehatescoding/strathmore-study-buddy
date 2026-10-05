@@ -1,4 +1,4 @@
-"""Ops tests: DB-aware /health, worker healthcheck ping, DATABASE_URL driver."""
+"""Ops tests: DB-aware /health, /version, worker healthcheck ping, DATABASE_URL driver."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,6 +47,21 @@ def test_health_503_when_db_unreachable():
         r = client.get("/health")
         assert r.status_code == 503
         assert r.json() == {"status": "degraded", "db": "unreachable"}
+
+
+def test_version_reports_railway_commit(monkeypatch, caplog):
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "8490f56abc")
+    for client in _client(_engine(True)):
+        with caplog.at_level("INFO", logger="uvicorn.error"), client:
+            r = client.get("/version")
+    assert r.status_code == 200 and r.json() == {"commit": "8490f56abc"}
+    assert "starting web at commit 8490f56abc" in caplog.text
+
+
+def test_version_unknown_outside_a_git_deploy(monkeypatch):
+    monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
+    for client in _client(_engine(True)):
+        assert client.get("/version").json() == {"commit": "unknown"}
 
 
 def test_ping_disabled_by_default(monkeypatch):

@@ -112,7 +112,8 @@ def sync_state(session: Session, user: User) -> str:
     """Why a user with no courses has none, for the course list's empty
     state: "syncing" (a sync is pending or running), "disconnected" (no
     Moodle key or Classroom grant to sync with), "failed" (their latest
-    sync failed), else "empty" (synced fine, nothing to show)."""
+    sync failed), "unknown" (no sync on record: never queued, or pruned
+    by prune_finished), else "empty" (synced fine, nothing to show)."""
     from app.sync_cli import has_credentials
 
     mine = session.exec(
@@ -124,9 +125,9 @@ def sync_state(session: Session, user: User) -> str:
         return "syncing"
     if not any(has_credentials(source, user) for source in ("moodle", "classroom")):
         return "disconnected"
-    if mine and mine[0].status == "failed":
-        return "failed"
-    return "empty"
+    if not mine:
+        return "unknown"
+    return "failed" if mine[0].status == "failed" else "empty"
 
 
 def has_chunks(session: Session, user_id, source: str) -> bool:

@@ -98,6 +98,12 @@
     <p class="empty-text">
       Check your connections in <a href="/settings/moodle">Settings</a>. You may need to reconnect.
     </p>
+    {% elif sync_state == "unknown" %}
+    <h3 class="empty-title">No courses synced yet</h3>
+    <p class="empty-text">
+      Your courses will appear after the next daily sync. Check your connections in
+      <a href="/settings/moodle">Settings</a>.
+    </p>
     {% else %}
     <h3 class="empty-title">No courses found</h3>
     <p class="empty-text">

@@ -598,6 +598,7 @@ def test_pipeline_job_defers_behind_a_real_pipeline_lock(session, pipeline_user,
     ("running", "Your courses are syncing"),
     ("failed", "Your last sync failed"),
     ("completed", "No courses found"),
+    ("connected_no_history", "No courses synced yet"),
     ("other_user_pending", "No account connected"),
 ])
 def test_empty_course_list_explains_why(testapp, monkeypatch, setup, title):
@@ -609,7 +610,7 @@ def test_empty_course_list_explains_why(testapp, monkeypatch, setup, title):
     monkeypatch.setattr(settings, "google_refresh_token", "")
     with testapp["Session"]() as s:
         user = s.get(User, testapp["user_id"])
-        if setup in ("failed", "completed"):
+        if setup in ("failed", "completed", "connected_no_history"):
             user.moodle_token = encrypt_token("key")
             s.add(user)
         if setup in ("pending", "running", "failed", "completed"):
@@ -628,7 +629,7 @@ def test_empty_course_list_explains_why(testapp, monkeypatch, setup, title):
     page = testapp["client"].get("/").text
     assert title in page
     assert "sync_cli" not in page
-    if setup in ("none", "failed", "other_user_pending"):
+    if setup in ("none", "failed", "other_user_pending", "connected_no_history"):
         assert 'href="/settings/moodle"' in page
 
     with testapp["Session"]() as s:  # with courses, none of it shows

@@ -18,7 +18,9 @@ from app.extract import MAX_DOWNLOAD_BYTES, ExtractError, html_to_text, too_larg
 
 
 class MoodleError(RuntimeError):
-    pass
+    def __init__(self, message: str, errorcode: str | None = None):
+        super().__init__(message)
+        self.errorcode = errorcode  # Moodle's errorcode, when Moodle sent one
 
 
 class TokenRejected(MoodleError):
@@ -28,6 +30,10 @@ class TokenRejected(MoodleError):
 
 # Moodle's errorcode for a token it doesn't know (any more)
 REJECTED_TOKEN_ERRORS = {"invalidtoken"}
+# An expired token fails as "accessexception", but so does a live one calling
+# a function its service doesn't allow. site_info is allowed in every
+# service, so only there does it mean the token itself was refused.
+SITE_INFO = "core_webservice_get_site_info"
 
 
 class ForeignURLError(MoodleError):
@@ -65,13 +71,15 @@ class MoodleClient:
             raise MoodleError(f"{function} request failed: {e}") from e
         if isinstance(body, dict) and body.get("exception"):
             code = body.get("errorcode")
-            error = TokenRejected if code in REJECTED_TOKEN_ERRORS else MoodleError
-            raise error(f"{function}: {code}: {body.get('message')}")
+            rejected = code in REJECTED_TOKEN_ERRORS or (
+                code == "accessexception" and function == SITE_INFO)
+            error = TokenRejected if rejected else MoodleError
+            raise error(f"{function}: {code}: {body.get('message')}", errorcode=code)
         return body
 
     # -- capability probe: run first, confirms which functions this token may call
     def site_info(self):
-        return self.call("core_webservice_get_site_info")
+        return self.call(SITE_INFO)
 
     def get_users_courses(self, userid: int):
         return self.call("core_enrol_get_users_courses", userid=userid)

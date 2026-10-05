@@ -825,11 +825,34 @@ def test_moodle_call_raises_token_rejected_only_for_invalidtoken(monkeypatch):
 
     client = MoodleClient("https://m.example", "T")
     reply("invalidtoken")
-    with pytest.raises(TokenRejected):
-        client.site_info()
+    with pytest.raises(TokenRejected) as exc:
+        client.get_course_contents(1)
+    assert exc.value.errorcode == "invalidtoken"
     reply("invalidrecord")
     with pytest.raises(MoodleError) as exc:
         client.site_info()
+    assert not isinstance(exc.value, TokenRejected)
+    assert exc.value.errorcode == "invalidrecord"
+
+
+def test_moodle_accessexception_rejects_the_token_only_at_site_info(monkeypatch):
+    import io
+    import json
+
+    from app import moodle
+    from app.moodle import MoodleClient, MoodleError, TokenRejected
+
+    body = {"exception": "webservice_access_exception", "errorcode": "accessexception",
+            "message": "Access control exception"}
+    monkeypatch.setattr(moodle.urllib.request, "urlopen",
+                        lambda req, timeout: io.BytesIO(json.dumps(body).encode()))
+    client = MoodleClient("https://m.example", "T")
+    # an expired token is refused before any function runs
+    with pytest.raises(TokenRejected):
+        client.site_info()
+    # a live token calling a function its service doesn't allow keeps the key
+    with pytest.raises(MoodleError) as exc:
+        client.get_course_contents(1)
     assert not isinstance(exc.value, TokenRejected)
 
 

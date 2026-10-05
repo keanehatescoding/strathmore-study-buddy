@@ -21,6 +21,15 @@ class MoodleError(RuntimeError):
     pass
 
 
+class TokenRejected(MoodleError):
+    """Moodle no longer accepts the token (expired, revoked by an admin, or
+    reset by the student): retrying can't help until they reconnect."""
+
+
+# Moodle's errorcode for a token it doesn't know (any more)
+REJECTED_TOKEN_ERRORS = {"invalidtoken"}
+
+
 class ForeignURLError(MoodleError):
     """A download URL outside this Moodle's pluginfile endpoints. Never
     fetched: the token would be sent along with it."""
@@ -55,7 +64,9 @@ class MoodleClient:
         except Exception as e:
             raise MoodleError(f"{function} request failed: {e}") from e
         if isinstance(body, dict) and body.get("exception"):
-            raise MoodleError(f"{function}: {body.get('errorcode')}: {body.get('message')}")
+            code = body.get("errorcode")
+            error = TokenRejected if code in REJECTED_TOKEN_ERRORS else MoodleError
+            raise error(f"{function}: {code}: {body.get('message')}")
         return body
 
     # -- capability probe: run first, confirms which functions this token may call

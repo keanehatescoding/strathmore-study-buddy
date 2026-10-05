@@ -20,6 +20,9 @@ from app.moodle import MoodleClient, MoodleError
 
 MOBILE_SERVICE = "moodle_mobile_app"
 _PURPOSE = "moodle-token"
+# stored in place of a key Moodle rejected: never decrypts (no "v1:" prefix),
+# so it reads as no key, but Settings can say why the key is gone
+REJECTED = "rejected"
 
 
 def encrypt_token(token: str) -> str:
@@ -68,6 +71,30 @@ def token_for(user) -> str | None:
     if not settings.moodle_token or not is_owner(user, settings.moodle_token_owner):
         return None
     return settings.moodle_token
+
+
+def forget_rejected_token(session, user, token: str) -> bool:
+    """Replace the user's stored Moodle key with REJECTED after Moodle
+    rejected it, so Settings asks them to reconnect. Only if
+    it is still `token`: a reconnect may have stored a new key meanwhile.
+    The shared MOODLE_TOKEN isn't stored on the user, so it is never touched."""
+    from sqlmodel import update
+
+    from app.models import User
+
+    session.rollback()
+    session.refresh(user)
+    sealed = user.moodle_token
+    if sealed is None or decrypt_token(sealed) != token:
+        return False
+    # compare-and-clear in the UPDATE itself, as auth.forget_revoked_token does
+    cleared = session.exec(
+        update(User).where(User.id == user.id, User.moodle_token == sealed)
+        .values(moodle_token=REJECTED)
+    ).rowcount
+    session.commit()
+    session.refresh(user)
+    return cleared == 1
 
 
 def is_owner(user, owner_email: str) -> bool:

@@ -676,7 +676,7 @@ def moodle_settings(
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    from app.moodle_tokens import decrypt_token, token_for
+    from app.moodle_tokens import REJECTED, decrypt_token, token_for
 
     own = decrypt_token(user.moodle_token) is not None
     google_own = auth_mod.refresh_token_for(user) is not None
@@ -687,6 +687,7 @@ def moodle_settings(
             "connected": own,
             "shared": not own and token_for(user) is not None,
             "stale": bool(user.moodle_token) and not own,
+            "rejected": user.moodle_token == REJECTED,
             "google_connected": google_own,
             "google_shared": not google_own and auth_mod.classroom_token_for(user) is not None,
             "google_stale": bool(user.google_refresh_token) and not google_own,

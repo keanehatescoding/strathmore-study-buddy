@@ -782,3 +782,98 @@ def test_revoked_grant_keeps_a_token_stored_after_the_read(session, user_id):
     session.refresh = refresh_then_sign_in
     assert not forget_revoked_token(session, user, "DEAD")
     assert refresh_token_for(user) == "FRESH"
+
+
+def _moodle_job(session, monkeypatch, client):
+    import app.sync_cli as sync_cli
+    from app.jobs import run_sync_job
+    from app.moodle import MoodleAdapter
+
+    monkeypatch.setattr(sync_cli, "build_adapter", lambda source, user: MoodleAdapter(client))
+    return run_sync_job(session, {"source": "moodle", "course_id": None,
+                                  "user_email": "s@x.edu"})
+
+
+def _store_moodle_key(session, user_id, token):
+    from app.moodle_tokens import encrypt_token
+
+    user = session.get(User, user_id)
+    user.moodle_token = encrypt_token(token)
+    session.add(user)
+    session.commit()
+    return user
+
+
+class _RejectedKey(FakeMoodleClient):
+    def site_info(self):
+        from app.moodle import TokenRejected
+
+        raise TokenRejected("core_webservice_get_site_info: invalidtoken: Invalid token")
+
+
+def test_moodle_call_raises_token_rejected_only_for_invalidtoken(monkeypatch):
+    import io
+    import json
+
+    from app import moodle
+    from app.moodle import MoodleClient, MoodleError, TokenRejected
+
+    def reply(errorcode):
+        body = {"exception": "moodle_exception", "errorcode": errorcode, "message": "no"}
+        monkeypatch.setattr(moodle.urllib.request, "urlopen",
+                            lambda req, timeout: io.BytesIO(json.dumps(body).encode()))
+
+    client = MoodleClient("https://m.example", "T")
+    reply("invalidtoken")
+    with pytest.raises(TokenRejected):
+        client.site_info()
+    reply("invalidrecord")
+    with pytest.raises(MoodleError) as exc:
+        client.site_info()
+    assert not isinstance(exc.value, TokenRejected)
+
+
+def test_rejected_moodle_key_is_forgotten(session, user_id, monkeypatch):
+    from app.moodle_tokens import REJECTED, token_for
+    from app.sync_cli import NotConnectedError
+
+    user = _store_moodle_key(session, user_id, "DEAD")
+    with pytest.raises(NotConnectedError, match="reconnect"):
+        _moodle_job(session, monkeypatch, _RejectedKey())
+    session.refresh(user)
+    assert user.moodle_token == REJECTED
+    assert token_for(user) is None  # sync-cron skips them until they reconnect
+
+
+def test_rejected_moodle_key_mid_sync_is_still_forgotten(session, user_id, monkeypatch):
+    from app.moodle import TokenRejected
+    from app.moodle_tokens import REJECTED
+
+    class _RejectedContents(FakeMoodleClient):
+        def get_course_contents(self, courseid):
+            raise TokenRejected("core_course_get_contents: invalidtoken: Invalid token")
+
+    user = _store_moodle_key(session, user_id, "DEAD")
+    with pytest.raises(Exception, match="reconnect"):
+        _moodle_job(session, monkeypatch, _RejectedContents())
+    session.refresh(user)
+    assert user.moodle_token == REJECTED
+
+
+def test_rejected_moodle_key_keeps_a_key_stored_meanwhile(session, user_id):
+    from app.moodle_tokens import decrypt_token, forget_rejected_token
+
+    user = _store_moodle_key(session, user_id, "FRESH")
+    assert not forget_rejected_token(session, user, "DEAD")
+    assert decrypt_token(user.moodle_token) == "FRESH"
+
+
+def test_rejected_shared_moodle_key_touches_no_user(session, user_id, monkeypatch):
+    from app.config import settings
+    from app.sync_cli import NotConnectedError
+
+    monkeypatch.setattr(settings, "moodle_token", "SHARED")
+    monkeypatch.setattr(settings, "moodle_token_owner", "s@x.edu")
+    with pytest.raises(NotConnectedError, match="shared MOODLE_TOKEN"):
+        _moodle_job(session, monkeypatch, _RejectedKey())
+    assert session.get(User, user_id).moodle_token is None

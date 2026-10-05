@@ -472,17 +472,21 @@ def sync_all(session: Session, adapter: SourceAdapter, user_id) -> dict[str, Syn
         try:
             results[c.source_id] = sync_course(session, adapter, c.source_id, user_id, c)
         except Exception as e:
-            if _revoked_grant(e):
+            if _credentials_gone(e):
                 raise  # every course would fail; the job forgets the token
             session.rollback()
             results[c.source_id] = SyncStats(error=f"{type(e).__name__}: {e}"[:500])
     return results
 
 
-def _revoked_grant(e: Exception) -> bool:
+def _credentials_gone(e: Exception) -> bool:
+    """A revoked Google grant or a Moodle token Moodle no longer accepts."""
     from google.auth.exceptions import RefreshError
 
-    return isinstance(e, RefreshError) and "invalid_grant" in str(e)
+    from app.moodle import TokenRejected
+
+    return (isinstance(e, TokenRejected)
+            or isinstance(e, RefreshError) and "invalid_grant" in str(e))
 
 
 def failed_courses(results: dict[str, SyncStats]) -> list[str]:

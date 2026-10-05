@@ -361,6 +361,8 @@ def course_list(
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
+    from app.jobs import sync_state
+
     courses = session.exec(
         select(Course)
         .where(Course.user_id == user.id)
@@ -388,6 +390,8 @@ def course_list(
         {
             "courses": courses,
             "counts": counts,
+            # only needed to explain an empty list
+            "sync_state": None if courses else sync_state(session, user),
             "user": user,
             "due_count": due_count(session, user.id),
             "active_page": "courses",

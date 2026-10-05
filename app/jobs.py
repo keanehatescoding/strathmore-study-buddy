@@ -108,6 +108,28 @@ def enqueue_sync_once(session: Session, source: str, user_email: str) -> Job | N
     return _enqueue_once(session, "sync", source, user_email, {"course_id": None})
 
 
+def sync_state(session: Session, user: User) -> str:
+    """Why a user with no courses has none, for the course list's empty
+    state: "syncing" (a sync is pending or running), "disconnected" (no
+    Moodle key or Classroom grant to sync with), "failed" (their latest
+    sync failed), "unknown" (no sync on record: never queued, or pruned
+    by prune_finished), else "empty" (synced fine, nothing to show)."""
+    from app.sync_cli import has_credentials
+
+    mine = session.exec(
+        select(Job).where(Job.type == "sync",
+                          Job.payload["user_email"].as_string() == user.email)
+        .order_by(Job.updated_at.desc())
+    ).all()
+    if any(j.status in ("pending", "running") for j in mine):
+        return "syncing"
+    if not any(has_credentials(source, user) for source in ("moodle", "classroom")):
+        return "disconnected"
+    if not mine:
+        return "unknown"
+    return "failed" if mine[0].status == "failed" else "empty"
+
+
 def has_chunks(session: Session, user_id, source: str) -> bool:
     """Whether any of the user's `source` courses has been chunked yet."""
     return session.exec(

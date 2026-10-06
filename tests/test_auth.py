@@ -9,7 +9,7 @@ import app.auth as auth_mod
 from app.config import settings
 from app.db import get_session
 from app.main import app
-from app.models import Course, User
+from app.models import Course, Job, User
 from tests.dbutil import make_engine
 
 
@@ -516,6 +516,33 @@ def test_enqueue_sync_once_skips_while_one_is_active():
         s.add(first)
         s.commit()
         assert enqueue_sync_once(s, "classroom", "a@x.edu") is not None
+
+
+def test_enqueue_sync_once_loses_race_quietly(monkeypatch):
+    # Two /connect submissions both pass the active-job check before either
+    # inserts: the unique index turns the second insert away.
+    from app import jobs
+
+    with _memory_session() as s:
+        monkeypatch.setattr(s, "exec", _blind_to_jobs(s.exec))
+        assert jobs.enqueue_sync_once(s, "moodle", "a@x.edu") is not None
+        assert jobs.enqueue_sync_once(s, "moodle", "a@x.edu") is None
+        monkeypatch.undo()
+        assert len(s.exec(select(Job)).all()) == 1
+
+
+def _blind_to_jobs(real_exec):
+    """session.exec that reports no jobs, as a racing caller would see."""
+    class Empty:
+        def all(self):
+            return []
+
+    def fake(stmt, *a, **kw):
+        if Job.__table__ in stmt.get_final_froms():
+            return Empty()
+        return real_exec(stmt, *a, **kw)
+
+    return fake
 
 
 def _session_data(client) -> dict:

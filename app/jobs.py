@@ -35,6 +35,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, delete, exists, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
@@ -98,20 +99,28 @@ def enqueue(
 def _enqueue_once(session: Session, job_type: str, source: str, user_email: str,
                   payload: dict) -> Job | None:
     """Queue `job_type` unless one is already pending or running for this
-    source and user. Returns the new job, or None."""
+    source and user. Returns the new job, or None. The check is only a fast
+    path: uq_jobs_active_user_job settles two callers that both pass it."""
     active = session.exec(
         select(Job).where(Job.type == job_type, Job.status.in_(("pending", "running")))
     ).all()
     if any(j.payload.get("source") == source and j.payload.get("user_email") == user_email
            for j in active):
         return None
-    return enqueue(session, job_type, {"source": source, "user_email": user_email, **payload})
+    try:
+        return enqueue(session, job_type,
+                       {"source": source, "user_email": user_email, **payload})
+    except IntegrityError:  # lost the race to another enqueue
+        session.rollback()
+        return None
 
 
-def enqueue_sync_once(session: Session, source: str, user_email: str) -> Job | None:
-    """Queue a full sync of `source` for the user unless one is already
-    pending or running for them. Returns the new job, or None."""
-    return _enqueue_once(session, "sync", source, user_email, {"course_id": None})
+def enqueue_sync_once(session: Session, source: str, user_email: str,
+                      course_id: str | None = None) -> Job | None:
+    """Queue a sync of `source` for the user (one course, or all when
+    `course_id` is None) unless a sync is already pending or running for
+    them. Returns the new job, or None."""
+    return _enqueue_once(session, "sync", source, user_email, {"course_id": course_id})
 
 
 def sync_state(session: Session, user: User) -> str:

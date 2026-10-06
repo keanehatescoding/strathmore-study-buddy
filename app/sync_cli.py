@@ -79,14 +79,11 @@ def main() -> None:
             failed = 0
             for u in users:
                 if args.enqueue:
-                    from app.jobs import enqueue
+                    from app.jobs import enqueue_sync_once
 
-                    job = enqueue(session, "sync", {
-                        "source": args.source,
-                        "course_id": args.course,
-                        "user_email": u.email,
-                    })
-                    print(f"enqueued {job.id} for {u.email}")
+                    job = enqueue_sync_once(session, args.source, u.email, args.course)
+                    print(f"enqueued {job.id} for {u.email}" if job
+                          else f"{u.email}: a sync is already queued")
                     continue
                 try:  # one user's revoked token or outage mustn't stop the rest
                     _sync_inline(session, args.source, u, args.course)
@@ -105,14 +102,13 @@ def main() -> None:
         if user is None:
             raise SystemExit(f"no such user {args.user} — log in via the web UI first")
         if args.enqueue:
-            from app.jobs import enqueue
+            from app.jobs import enqueue_sync_once
 
-            job = enqueue(session, "sync", {
-                "source": args.source,
-                "course_id": args.course,
-                "user_email": args.user,
-            })
-            print(f"enqueued {job.id} (run `python -m app.worker` to drain)")
+            job = enqueue_sync_once(session, args.source, user.email, args.course)
+            if job is None:
+                print(f"a {args.source} sync is already queued for {user.email}")
+            else:
+                print(f"enqueued {job.id} (run `python -m app.worker` to drain)")
             return
 
         try:

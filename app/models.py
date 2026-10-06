@@ -229,6 +229,7 @@ class NotificationEvent(SQLModel, table=True):
 
 
 ACTIVE_NOTIFY_WHERE = "type = 'send_notifications' AND status IN ('pending', 'running')"
+ACTIVE_USER_JOB_WHERE = "type IN ('sync', 'pipeline') AND status IN ('pending', 'running')"
 
 
 class Job(SQLModel, table=True):
@@ -242,6 +243,17 @@ class Job(SQLModel, table=True):
             "uq_jobs_active_notify", "type", unique=True,
             postgresql_where=text(ACTIVE_NOTIFY_WHERE),
             sqlite_where=text(ACTIVE_NOTIFY_WHERE),
+        ),
+        # At most one queued/running sync (or pipeline) job per source and
+        # user: two syncs racing each other can commit an older snapshot last
+        # and purge quiz items, review schedules with them (app.jobs._enqueue_once).
+        # `->>` works on Postgres json and SQLite >= 3.38 alike.
+        Index(
+            "uq_jobs_active_user_job", "type",
+            text("(payload ->> 'source')"), text("(payload ->> 'user_email')"),
+            unique=True,
+            postgresql_where=text(ACTIVE_USER_JOB_WHERE),
+            sqlite_where=text(ACTIVE_USER_JOB_WHERE),
         ),
         # Claiming / the notify busy check (status + available_at), and the
         # reaper / pruning (status + updated_at). Both lead with status, so

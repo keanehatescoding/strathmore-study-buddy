@@ -234,6 +234,25 @@ def test_unchanged_assignment_not_counted(session, user_id):
     assert sync_course(session, adapter, "c1", user_id).assignments_updated == 1
 
 
+def test_unlisted_assignment_removed(session, user_id):
+    adapter = FakeAdapter()
+    adapter.assignments["c1"].append(AssignmentData("a2", "Assignment 2", "t1", None, None))
+    sync_course(session, adapter, "c1", user_id)
+    del adapter.assignments["c1"][0]  # a1 deleted upstream
+    stats = sync_course(session, adapter, "c1", user_id)
+    assert stats.assignments_removed == 1
+    assert [a.source_id for a in session.exec(select(Assignment))] == ["a2"]
+
+
+def test_empty_assignment_list_removes_nothing(session, user_id):
+    # an outage or blank reply looks like "no assignments": keep what we have
+    adapter = FakeAdapter()
+    sync_course(session, adapter, "c1", user_id)
+    adapter.assignments["c1"] = []
+    assert sync_course(session, adapter, "c1", user_id).assignments_removed == 0
+    assert len(session.exec(select(Assignment)).all()) == 1
+
+
 def _to_fingerprint(session, user_id, fetch_content):
     """Sync with a legacy content hash, then switch the file to a fingerprint."""
     adapter = FakeAdapter()

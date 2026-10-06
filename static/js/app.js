@@ -14,7 +14,11 @@ document.addEventListener('DOMContentLoaded', () => {
       let visibleCount = 0;
 
       rows.forEach(row => {
-        const matches = row.textContent.toLowerCase().includes(query);
+        const label = ['.code', '.name']
+          .map(sel => row.querySelector(sel)?.textContent ?? '')
+          .join(' ')
+          .toLowerCase();
+        const matches = label.includes(query);
         row.hidden = !matches;
         if (matches) visibleCount++;
       });

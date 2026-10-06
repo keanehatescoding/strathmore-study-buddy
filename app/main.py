@@ -236,7 +236,7 @@ def health(session: Session = Depends(get_session)):
 
 @app.get("/version")
 def version():
-    # Compare with `git rev-parse origin/master` to spot a stale deploy.
+    # Compare with `git ls-remote origin refs/heads/master` to spot a stale deploy.
     return {"commit": running_commit()}
 
 
@@ -710,16 +710,15 @@ def moodle_settings(
 
 def _connect_moodle(session: Session, user: User, token: str) -> str:
     """Verify `token`, store it encrypted, queue a first sync; returns the Moodle name."""
-    from app.jobs import enqueue
+    from app.jobs import enqueue_sync_once
     from app.moodle_tokens import encrypt_token, verify_token
 
     info = verify_token(settings.moodle_base_url, token)
     user.moodle_token = encrypt_token(token)
     session.add(user)
     session.commit()
-    enqueue(session, "sync", {
-        "source": "moodle", "course_id": None, "user_email": user.email,
-    })
+    # once: reconnecting, or a double-submitted form, shouldn't stack syncs
+    enqueue_sync_once(session, "moodle", user.email)
     return str(info.get("fullname") or info.get("username") or "your account")
 
 

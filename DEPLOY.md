@@ -21,7 +21,7 @@
    | `pipeline-cron` | step 6 | `0 6 * * *` |
 
    The worker polls the job queue every minute, so a sync queued at sign-in
-   or by the Sync button starts within a minute, as does the first pipeline
+   or on connecting Moodle starts within a minute, as does the first pipeline
    run for each new user (see below). The notification pass over all users
    stays hourly: the worker queues it only when the last one is an hour old
    (`--notify-every SECONDS` changes that; the default is 3600 with

@@ -2,78 +2,45 @@
 {% block title %}{{ resource.title }} — Strathmore Study Buddy{% endblock %}
 
 {% block breadcrumbs %}
-<nav class="breadcrumb">
-  <a href="/">Courses</a>
-  <span class="breadcrumb-sep">/</span>
-  <a href="/courses/{{ course.id }}">{{ course.name }}</a>
-  <span class="breadcrumb-sep">/</span>
-  <span class="breadcrumb-current">{{ resource.title }}</span>
+<nav class="crumbs" aria-label="Breadcrumb">
+  <a href="/">Courses</a><span aria-hidden="true">/</span><a href="/courses/{{ course.id }}">{{ course.name }}</a><span aria-hidden="true">/</span>{{ resource.title }}
 </nav>
 {% endblock %}
 
 {% block body %}
-<!-- Resource Header Card -->
-<div class="card resource-header">
-  <div class="page-toolbar">
-    <a href="/courses/{{ course.id }}" class="btn btn-sm btn-outline">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="m15 18-6-6 6-6"/>
-      </svg>
-      Back to {{ course.name }}
-    </a>
-    <div class="badge-row">
-      <span class="badge">{{ resource.type }}</span>
-      <span class="badge {{ resource.status }}">{{ resource.status }}</span>
-      {% if resource.mime_type %}<span class="badge">{{ resource.mime_type }}</span>{% endif %}
-    </div>
-  </div>
-
-  <h1 class="resource-title-heading">{{ resource.title }}</h1>
-
-  {% if resource.raw_url %}
-  <p class="resource-source">
-    Source: <a href="{{ resource.raw_url }}" target="_blank" rel="noopener">{{ resource.raw_url[:80] }}</a>
+<header class="page-head">
+  <h1 class="page-title">{{ resource.title }}</h1>
+  <p class="page-meta">
+    {{ resource.type }}{% if resource.mime_type %} · {{ resource.mime_type }}{% endif %} · <span class="tag {{ resource.status }}">{{ resource.status }}</span>
+    {% if resource.raw_url %}<br><a href="{{ resource.raw_url }}" target="_blank" rel="noopener">Open the original</a>{% endif %}
   </p>
-  {% endif %}
-
   {% if resource.error %}
-  <div class="resource-error">
-    <strong>Error:</strong> {{ resource.error }}
-  </div>
+  <p class="resource-error">{{ resource.error }}</p>
   {% endif %}
-</div>
+</header>
 
 {% if passage %}
 <!-- The passage a question came from (?chunk= on the result page's link) -->
-<div class="reader-box source-box" id="source">
-  <div class="reader-header">
-    <h2 class="section-title">Source passage: {{ source.title }}</h2>
-    {% if passage.located %}
-    <span class="badge badge-meta">characters {{ source.start_char }}–{{ source.end_char }}</span>
-    {% endif %}
+<section class="reader" id="source">
+  <div class="section-head">
+    <h2>Source passage: {{ source.title }}</h2>
+    {% if passage.located %}<span class="aside">characters {{ source.start_char }}–{{ source.end_char }}</span>{% endif %}
   </div>
   {% if not passage.located %}
   <p class="section-note">The passage couldn't be located in the current text, so this is the chunk as it was stored.</p>
   {% endif %}
   <pre class="text source-text">{{ passage.before }}<mark class="source-mark">{{ passage.passage }}</mark>{{ passage.after }}</pre>
-</div>
+</section>
 {% endif %}
 
-<!-- Extracted Text Section -->
-<div class="reader-box">
-  <div class="reader-header">
-    <h2 class="section-title">Extracted text</h2>
+<section class="reader">
+  <div class="section-head">
+    <h2>Extracted text</h2>
     {% if resource.extracted_text %}
-    <div class="reader-actions">
-      <span class="badge badge-size">{{ resource.extracted_text|length }} characters</span>
-      <button type="button" id="copy-extracted-btn" class="btn btn-sm btn-outline"{% if resource.extracted_text|length > preview_chars %} data-full-text-url="/resources/{{ resource.id }}/text"{% endif %}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-        </svg>
-        Copy Text
-      </button>
-    </div>
+    <span class="actions">
+      <span class="aside">{{ "{:,}".format(resource.extracted_text|length) }} characters</span>
+      <button type="button" id="copy-extracted-btn" class="btn btn-small"{% if resource.extracted_text|length > preview_chars %} data-full-text-url="/resources/{{ resource.id }}/text"{% endif %}>Copy text</button>
+    </span>
     {% endif %}
   </div>
 
@@ -81,40 +48,30 @@
   {% if resource.extracted_text|length > preview_chars %}
   <p class="section-note">
     Showing the first {{ "{:,}".format(preview_chars) }} of {{ "{:,}".format(resource.extracted_text|length) }} characters.
-    Copy Text copies all of it, or <a href="/resources/{{ resource.id }}/text" target="_blank" rel="noopener">open the full text</a>.
+    Copy text copies all of it, or <a href="/resources/{{ resource.id }}/text" target="_blank" rel="noopener">open the full text</a>.
   </p>
   {% endif %}
   <pre class="text" id="extracted-text-content">{{ resource.extracted_text[:preview_chars] }}</pre>
   {% else %}
-  <div class="empty-state reader-empty">
-    <p class="flush"><small>No extracted text yet — extraction runs in Phase 2.</small></p>
-  </div>
+  <p class="row-empty">No extracted text yet — extraction runs in Phase 2.</p>
   {% endif %}
-</div>
+</section>
 
-<!-- AI Concept Chunks Section -->
 {% if chunks %}
-<div class="section-block">
-  <div class="section-header section-header-baseline">
-    <h2 class="section-title">Chunks ({{ chunks|length }})</h2>
-    <span class="section-note">Atomic concept units for quiz generation</span>
+<section class="reader">
+  <div class="section-head">
+    <h2>Chunks</h2>
+    <span class="aside">{{ chunks|length }} concept units for quiz generation</span>
   </div>
-
-  <div>
-    {% for c in chunks %}
-    <div class="chunk-card{% if source and c.id == source.id %} is-source{% endif %}" id="chunk-{{ c.id }}">
-      <div class="chunk-title">
-        <span><strong>{{ c.title }}</strong></span>
-        <span class="badge badge-meta">
-          {{ c.content|length }} chars{% if c.start_char is not none %}, source @{{ c.start_char }}–{{ c.end_char }}{% endif %}
-        </span>
-      </div>
-      <div class="chunk-preview">
-        {{ c.content[:220] }}{% if c.content|length > 220 %}…{% endif %}
-      </div>
+  {% for c in chunks %}
+  <div class="chunk-card{% if source and c.id == source.id %} is-source{% endif %}" id="chunk-{{ c.id }}">
+    <div class="chunk-head">
+      <span>{{ c.title }}</span>
+      <small>{{ c.content|length }} chars{% if c.start_char is not none %} · @{{ c.start_char }}–{{ c.end_char }}{% endif %}</small>
     </div>
-    {% endfor %}
+    <div class="chunk-preview">{{ c.content[:220] }}{% if c.content|length > 220 %}…{% endif %}</div>
   </div>
-</div>
+  {% endfor %}
+</section>
 {% endif %}
 {% endblock %}

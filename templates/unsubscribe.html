@@ -2,23 +2,13 @@
 {% block title %}Unsubscribe — Strathmore Study Buddy{% endblock %}
 
 {% block body %}
-<section class="page-hero">
-  <div class="hero-content">
-    {% if done %}
-      <h1 class="hero-title">You're unsubscribed</h1>
-      <p class="hero-subtitle">Study Buddy won't email {{ email }} any more.</p>
-    {% else %}
-      <h1 class="hero-title">Unsubscribe?</h1>
-      <p class="hero-subtitle">Stop all Study Buddy emails to {{ email }}.</p>
-    {% endif %}
-  </div>
-</section>
-
-<div class="card settings-card">
+<div class="empty">
   {% if done %}
-    <p class="settings-text">Changed your mind? Turn emails back on in Settings.</p>
-    <a href="/settings/moodle" class="btn btn-primary">Settings</a>
+    <h1 class="page-title">You're unsubscribed</h1>
+    <p>Study Buddy won't email {{ email }} any more. Changed your mind? Turn emails back on in <a href="/settings/moodle">Settings</a>.</p>
   {% else %}
+    <h1 class="page-title">Unsubscribe?</h1>
+    <p>Stop all Study Buddy emails to {{ email }}.</p>
     <form method="post" action="/unsubscribe/{{ token }}">
       <button type="submit" class="btn btn-primary">Unsubscribe</button>
     </form>

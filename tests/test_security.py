@@ -161,7 +161,7 @@ def test_page_errors_are_html(testapp):
         r = client.get(url)
         assert r.status_code == status, url
         assert r.headers["content-type"].startswith("text/html"), url
-        assert f"<h1 class=\"hero-title\">{title}</h1>" in r.text, url
+        assert f"<h1 class=\"page-title\">{title}</h1>" in r.text, url
         _assert_hardened(r)
     r = client.post("/settings/google/disconnect", data={"csrf_token": "wrong"})
     assert r.status_code == 403 and "Not allowed" in r.text

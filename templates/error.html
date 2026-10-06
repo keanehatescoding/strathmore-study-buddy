@@ -2,15 +2,10 @@
 {% block title %}{{ title }} — Strathmore Study Buddy{% endblock %}
 
 {% block body %}
-<section class="page-hero">
-  <div class="hero-content">
-    <h1 class="hero-title">{{ title }}</h1>
-    <p class="hero-subtitle">{{ message }}</p>
-  </div>
-</section>
-
-<div class="card settings-card">
-  <p class="settings-text">Error {{ status_code }}.</p>
-  <a href="/" class="btn btn-primary">Back to your courses</a>
+<div class="empty">
+  <h1 class="page-title">{{ title }}</h1>
+  <p>{{ message }}</p>
+  <p class="faint">Error {{ status_code }}</p>
+  <a href="/" class="btn">Back to your courses</a>
 </div>
 {% endblock %}

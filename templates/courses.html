@@ -2,123 +2,60 @@
 {% block title %}Courses — Strathmore Study Buddy{% endblock %}
 
 {% block body %}
-<!-- Page Hero Banner -->
-<section class="page-hero">
-  <div class="hero-content">
-    <h1 class="hero-title">Course Library</h1>
-    <p class="hero-subtitle">
-      Access your synchronized Strathmore eLearning (Moodle) & Google Classroom courses, lecture materials, and AI-generated flashcard decks.
-    </p>
-    {% if due_count and due_count > 0 %}
-    <div class="hero-actions">
-      <a href="/review/take" class="btn btn-accent">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polygon points="5 3 19 12 5 21 5 3"/>
-        </svg>
-        Review {{ due_count }} Due Item{% if due_count > 1 %}s{% endif %} Now
-      </a>
-      <a href="/stats" class="btn btn-outline">View Study Stats</a>
-    </div>
-    {% endif %}
-  </div>
-</section>
-
-<!-- Filter & Search Toolbar -->
-{% if courses %}
-<div class="toolbar-bar">
-  <div class="search-wrapper">
-    <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="11" cy="11" r="8"/>
-      <path d="m21 21-4.3-4.3"/>
-    </svg>
-    <input type="text" id="course-search" class="search-input" placeholder="Search courses by code or title…" autocomplete="off">
-  </div>
-  <div class="course-count">
-    {{ courses|length }} Course{% if courses|length != 1 %}s{% endif %} available
-  </div>
+{% if due_count and due_count > 0 %}
+<div class="due-strip">
+  <p><strong>{{ due_count }}</strong> question{% if due_count != 1 %}s{% endif %} due for review</p>
+  <a href="/review/take" class="btn btn-primary">Start review</a>
 </div>
 {% endif %}
 
-<!-- Course Cards Grid -->
-<div class="courses-grid" id="courses-grid">
+<div class="section-head">
+  <h1 class="flush">Courses</h1>
+  {% if courses %}<span class="aside">{{ courses|length }} course{% if courses|length != 1 %}s{% endif %}</span>{% endif %}
+</div>
+
+{% if courses|length > 6 %}
+<input type="search" id="course-search" class="search" placeholder="Filter by code or title" autocomplete="off" aria-label="Filter courses">
+{% endif %}
+
+{% if courses %}
+<ul class="rows" id="courses-list">
   {% for c in courses %}
-  <div class="course-card-item">
-    <div class="course-card">
-      <div class="course-card-top">
-        {% if c.code %}
-          <span class="badge course-code">{{ c.code }}</span>
-        {% endif %}
-        <span class="badge {{ c.source }}">{{ c.source|capitalize }}</span>
-      </div>
-
-      <a href="/courses/{{ c.id }}" class="course-title">{{ c.name }}</a>
-
-      <div class="course-meta">
-        <div class="course-meta-item" title="Topics in course">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-            <polyline points="9 22 9 12 15 12 15 22"/>
-          </svg>
-          <span>{{ counts[c.id|string].topics }} topics</span>
-        </div>
-        <div class="course-meta-item" title="Resources extracted">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-          <span>{{ counts[c.id|string].resources }} resources</span>
-        </div>
-      </div>
-
-      <div class="course-card-footer">
-        <a href="/courses/{{ c.id }}" class="btn btn-sm btn-outline btn-block">
-          Open Course
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14"/>
-            <path d="m12 5 7 7-7 7"/>
-          </svg>
-        </a>
-      </div>
-    </div>
-  </div>
-  {% else %}
-  <div class="empty-state grid-span-all">
-    <div class="empty-icon">📚</div>
-    {% if sync_state == "syncing" %}
-    <h3 class="empty-title">Your courses are syncing</h3>
-    <p class="empty-text">This page fills in within a few minutes. Refresh to check.</p>
-    {% elif sync_state == "disconnected" %}
-    <h3 class="empty-title">No account connected</h3>
-    <p class="empty-text">
-      <a href="/settings/moodle">Connect Strathmore Moodle in Settings</a>, or sign out and
-      sign in with Google again to bring in your Google Classroom courses.
-    </p>
-    {% elif sync_state == "failed" %}
-    <h3 class="empty-title">Your last sync failed</h3>
-    <p class="empty-text">
-      Check your connections in <a href="/settings/moodle">Settings</a>. You may need to reconnect.
-    </p>
-    {% elif sync_state == "unknown" %}
-    <h3 class="empty-title">No courses synced yet</h3>
-    <p class="empty-text">
-      Your courses will appear after the next daily sync. Check your connections in
-      <a href="/settings/moodle">Settings</a>.
-    </p>
-    {% else %}
-    <h3 class="empty-title">No courses found</h3>
-    <p class="empty-text">
-      Your connected accounts have no courses yet. Enrol on Moodle or Classroom, or check your
-      connections in <a href="/settings/moodle">Settings</a>.
-    </p>
-    {% endif %}
-  </div>
+  <li class="course-row">
+    <span class="code">{{ c.code or "" }}</span>
+    <span class="grow"><a href="/courses/{{ c.id }}" class="name">{{ c.name }}</a></span>
+    <span class="counts">{{ counts[c.id|string].topics }} topics · {{ counts[c.id|string].resources }} files{% if c.source == "classroom" %} · Classroom{% endif %}</span>
+  </li>
   {% endfor %}
+</ul>
+<p id="search-empty-state" class="row-empty" hidden>No courses match that filter.</p>
+{% else %}
+<div class="empty">
+  {% if sync_state == "syncing" %}
+  <h2>Your courses are syncing</h2>
+  <p>This page fills in within a few minutes. Refresh to check.</p>
+  {% elif sync_state == "disconnected" %}
+  <h2>No account connected</h2>
+  <p>
+    <a href="/settings/moodle">Connect Strathmore Moodle in Settings</a>, or sign out and
+    sign in with Google again to bring in your Google Classroom courses.
+  </p>
+  {% elif sync_state == "failed" %}
+  <h2>Your last sync failed</h2>
+  <p>Check your connections in <a href="/settings/moodle">Settings</a>. You may need to reconnect.</p>
+  {% elif sync_state == "unknown" %}
+  <h2>No courses synced yet</h2>
+  <p>
+    Your courses will appear after the next daily sync. Check your connections in
+    <a href="/settings/moodle">Settings</a>.
+  </p>
+  {% else %}
+  <h2>No courses found</h2>
+  <p>
+    Your connected accounts have no courses yet. Enrol on Moodle or Classroom, or check your
+    connections in <a href="/settings/moodle">Settings</a>.
+  </p>
+  {% endif %}
 </div>
-
-<!-- Search Empty State (Client-Side) -->
-<div id="search-empty-state" class="empty-state is-hidden">
-  <div class="empty-icon">🔍</div>
-  <h3 class="empty-title">No matching courses</h3>
-  <p class="empty-text">Try adjusting your search terms to find what you're looking for.</p>
-</div>
+{% endif %}
 {% endblock %}

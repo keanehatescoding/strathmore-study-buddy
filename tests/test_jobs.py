@@ -639,20 +639,21 @@ def test_empty_course_list_explains_why(testapp, monkeypatch, setup, title):
     assert "Maths" in page and title not in page
 
 
-def test_job_deferred_by_zero_goes_behind_due_jobs(session, fake_handler, monkeypatch):
+def test_job_deferred_by_zero_goes_behind_due_jobs(session, monkeypatch):
     order: list = []
 
     def once(s, payload):
         order.append("slice")
-        if len(order) == 1:
+        if order.count("slice") == 1:
             raise jobs.Defer(timedelta(0), "slice used up")
 
     monkeypatch.setitem(HANDLERS, "slow", once)
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: order.append("fake"))
     enqueue(session, "slow", {})
     enqueue(session, "fake", {"n": 1})  # queued later, but due before the hand-back
     out = run_due(session)
     assert out["deferred"] == 1 and out["completed"] == 2
-    assert order == ["slice", "slice"] and fake_handler == [{"n": 1}]
+    assert order == ["slice", "fake", "slice"]
 
 
 def test_notify_does_not_wait_for_a_pipeline_job(session, monkeypatch):

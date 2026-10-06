@@ -356,6 +356,27 @@ def test_moodle_adapter_fetches_contents_once_and_never_downloads(session, user_
     assert _resource(session, "11").extracted_text == "page 11"
 
 
+def test_moodle_assignment_warnings_remove_nothing(session, user_id):
+    # Moodle reports trouble as `warnings` beside a 200: the list may be
+    # partial, so it can add and update but must not delete
+    from app.moodle import MoodleAdapter
+
+    client = FakeMoodleClient()
+    assignment = {"id": 1, "cmid": 10, "name": "Essay", "duedate": 0}
+    client.get_assignments = lambda courseid: {
+        "courses": [{"id": 5, "assignments": [assignment, {**assignment, "id": 2}]}]}
+    sync_all(session, MoodleAdapter(client), user_id)
+    client.get_assignments = lambda courseid: {
+        "courses": [{"id": 5, "assignments": [{**assignment, "name": "Essay v2"}]}],
+        "warnings": [{"item": "module", "warningcode": "1", "message": "No access rights"}]}
+    stats = sync_all(session, MoodleAdapter(client), user_id)["5"]
+    assert (stats.assignments_updated, stats.assignments_removed) == (1, 0)
+    assert sorted(a.title for a in session.exec(select(Assignment))) == ["Essay", "Essay v2"]
+    client.get_assignments = lambda courseid: {
+        "courses": [{"id": 5, "assignments": [{**assignment, "name": "Essay v2"}]}]}
+    assert sync_all(session, MoodleAdapter(client), user_id)["5"].assignments_removed == 1
+
+
 def test_resource_moved_between_topics_keeps_row_and_progress(session, user_id):
     adapter = FakeAdapter()
     sync_course(session, adapter, "c1", user_id)

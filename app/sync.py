@@ -8,7 +8,7 @@ this module upserts them. Implements the plan's 6-step sync per course:
   topic changed -> move the row to the new topic, no reset
   unchanged     -> skip (hash check avoids re-running expensive LLM steps)
 Assignments are upserted separately and never become Resources; ones the
-source stops listing are deleted (but never off an empty list).
+source stops listing are deleted (never off an empty or partial list).
 """
 
 from __future__ import annotations
@@ -80,6 +80,11 @@ class AssignmentData:
     topic_source_id: str | None = None
     due_date: datetime | None = None
     description: str | None = None
+
+
+class PartialAssignments(list):
+    """An assignment list the source flagged as possibly incomplete (e.g.
+    Moodle warnings): sync upserts what it holds but deletes nothing off it."""
 
 
 class SourceAdapter(Protocol):
@@ -463,9 +468,9 @@ def sync_course(
             session.add(existing)
             session.commit()
             stats.assignments_updated += 1
-    # Deleted or hidden upstream: drop it. Only off a non-empty list, so an
-    # outage or a blank reply can't wipe every deadline the course has.
-    if fetched:
+    # Deleted or hidden upstream: drop it. Only off a non-empty, complete
+    # list, so an outage or a partial reply can't wipe the course's deadlines.
+    if fetched and not isinstance(fetched, PartialAssignments):
         listed = {a.source_id for a in fetched}
         for gone in session.exec(select(Assignment).where(
             Assignment.course_id == course.id, Assignment.source_id.not_in(listed)

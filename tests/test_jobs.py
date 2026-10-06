@@ -604,7 +604,7 @@ def test_sync_job_defers_while_another_sync_of_the_user_runs(session, monkeypatc
                                       "course_id": None})
     with pipeline.advisory_lock("app.sync:moodle:s@x.edu", make_engine()) as held:
         assert held  # e.g. a course A sync of the same user mid-run
-        assert run_due(session) == {"deferred": 1, "completed": 1}
+        assert run_due(session) == {"deferred": 1, "completed": 1, "failed": 0, "retried": 0}
     assert session.get(Job, other.id).status == "completed"
     _set(session, session.get(Job, job.id), available_at=datetime.now(timezone.utc))
     assert run_due(session)["completed"] == 1  # lock released: it runs

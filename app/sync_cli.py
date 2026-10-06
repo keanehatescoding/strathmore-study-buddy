@@ -83,7 +83,7 @@ def main() -> None:
 
                     job = enqueue_sync_once(session, args.source, u.email, args.course)
                     print(f"enqueued {job.id} for {u.email}" if job
-                          else f"{u.email}: a sync is already queued")
+                          else f"{u.email}: a sync covering that is already queued")
                     continue
                 try:  # one user's revoked token or outage mustn't stop the rest
                     _sync_inline(session, args.source, u, args.course)
@@ -106,7 +106,7 @@ def main() -> None:
 
             job = enqueue_sync_once(session, args.source, user.email, args.course)
             if job is None:
-                print(f"a {args.source} sync is already queued for {user.email}")
+                print(f"a {args.source} sync covering that is already queued for {user.email}")
             else:
                 print(f"enqueued {job.id} (run `python -m app.worker` to drain)")
             return

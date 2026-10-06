@@ -451,26 +451,23 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
     return result
 
 
-def _lock_key(source: str) -> int:
-    digest = hashlib.sha256(f"app.pipeline:{source}".encode()).digest()
+def _lock_key(name: str) -> int:
+    digest = hashlib.sha256(name.encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)  # a Postgres bigint
 
 
 @contextmanager
-def single_run(source: str, bind=None, wait: bool = False):
-    """Yield whether this process holds the run for `source`: two runs over
-    the same resources (overlapping cron, a backfill by hand) would both chunk
-    and quiz them, duplicating chunks. A session-level Postgres advisory lock,
-    so it goes away with the process even if it dies; SQLite has no
-    concurrent runs to guard against and always gets it. `wait` blocks until
-    the lock is free instead of giving up.
-    """
+def advisory_lock(name: str, bind=None, wait: bool = False):
+    """Yield whether this process holds the lock `name`. A session-level
+    Postgres advisory lock, so it goes away with the process even if it
+    dies; SQLite has no concurrent runs to guard against and always gets
+    it. `wait` blocks until the lock is free instead of giving up."""
     bind = bind or engine
     if bind.dialect.name != "postgresql":
         yield True
         return
     with bind.connect() as conn:
-        key = _lock_key(source)
+        key = _lock_key(name)
         if wait:
             conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": key})
             got = True
@@ -484,6 +481,13 @@ def single_run(source: str, bind=None, wait: bool = False):
             if got:  # pooled connections outlive this: release explicitly
                 conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
                 conn.commit()
+
+
+def single_run(source: str, bind=None, wait: bool = False):
+    """Yield whether this process holds the run for `source`: two runs over
+    the same resources (overlapping cron, a backfill by hand) would both chunk
+    and quiz them, duplicating chunks. See advisory_lock."""
+    return advisory_lock(f"app.pipeline:{source}", bind, wait)
 
 
 STAGES = ("extraction", "chunking", "quiz")

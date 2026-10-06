@@ -1,4 +1,4 @@
-"""At most one pending/running sync or pipeline job per source and user
+"""At most one pending/running sync or pipeline job per source, user and course
 
 Revision ID: 0020
 Revises: 0019_quiz_failures
@@ -17,6 +17,7 @@ depends_on = None
 WHERE = "type IN ('sync', 'pipeline') AND status IN ('pending', 'running')"
 SOURCE = "(payload ->> 'source')"
 USER = "(payload ->> 'user_email')"
+COURSE = "(COALESCE(payload ->> 'course_id', ''))"
 
 
 def upgrade() -> None:
@@ -31,6 +32,8 @@ def upgrade() -> None:
               AND kept.status IN ('pending', 'running')
               AND (kept.payload ->> 'source') = (jobs.payload ->> 'source')
               AND (kept.payload ->> 'user_email') = (jobs.payload ->> 'user_email')
+              AND COALESCE(kept.payload ->> 'course_id', '')
+                  = COALESCE(jobs.payload ->> 'course_id', '')
               AND (kept.status = 'running') >= (jobs.status = 'running')
               AND ((kept.status = 'running') > (jobs.status = 'running')
                    OR (kept.created_at, kept.id) < (jobs.created_at, jobs.id))
@@ -38,7 +41,7 @@ def upgrade() -> None:
     """)
     op.create_index(
         "uq_jobs_active_user_job", "jobs",
-        ["type", sa.text(SOURCE), sa.text(USER)], unique=True,
+        ["type", sa.text(SOURCE), sa.text(USER), sa.text(COURSE)], unique=True,
         postgresql_where=sa.text(WHERE), sqlite_where=sa.text(WHERE),
     )
 

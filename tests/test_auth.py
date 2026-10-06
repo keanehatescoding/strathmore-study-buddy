@@ -531,6 +531,39 @@ def test_enqueue_sync_once_loses_race_quietly(monkeypatch):
         assert len(s.exec(select(Job)).all()) == 1
 
 
+def test_enqueue_sync_once_keeps_other_courses():
+    from app.jobs import enqueue_sync_once
+
+    with _memory_session() as s:
+        a = enqueue_sync_once(s, "moodle", "a@x.edu", "A")
+        assert a is not None
+        assert enqueue_sync_once(s, "moodle", "a@x.edu", "A") is None  # same course
+        assert enqueue_sync_once(s, "moodle", "a@x.edu", "B") is not None  # another
+        everything = enqueue_sync_once(s, "moodle", "a@x.edu")
+        assert everything is not None  # a course sync doesn't cover the rest
+        assert enqueue_sync_once(s, "moodle", "a@x.edu", "C") is None  # all covers it
+        everything.status = "running"  # may be past C already
+        s.add(everything)
+        s.commit()
+        assert enqueue_sync_once(s, "moodle", "a@x.edu", "C") is not None
+
+
+def test_enqueue_sync_once_race_keeps_callers_changes(monkeypatch):
+    # Losing the race rolls back only the insert, not the caller's own
+    # pending work in the same session.
+    from app import jobs
+    from app.models import User
+
+    with _memory_session() as s:
+        assert jobs.enqueue_sync_once(s, "moodle", "a@x.edu") is not None
+        monkeypatch.setattr(s, "exec", _blind_to_jobs(s.exec))
+        s.add(User(email="mine@x.edu"))
+        assert jobs.enqueue_sync_once(s, "moodle", "a@x.edu") is None
+        monkeypatch.undo()
+        s.commit()
+        assert s.exec(select(User).where(User.email == "mine@x.edu")).first() is not None
+
+
 def _blind_to_jobs(real_exec):
     """session.exec that reports no jobs, as a racing caller would see."""
     class Empty:

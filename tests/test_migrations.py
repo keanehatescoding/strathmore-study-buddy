@@ -217,8 +217,10 @@ def test_0020_fails_duplicate_active_jobs_keeping_running_then_oldest(engine):
     m = _migration("0020_active_user_job")
     with engine.begin() as c:
         c.execute(text("DROP INDEX uq_jobs_active_user_job"))  # create_all made it
-        rows = [  # (name, type, source, user, status, created day)
+        rows = [  # (name, type, source, user, status, created day[, course])
             ("a_old", "sync", "moodle", "a@x.edu", "pending", 1),
+            ("a_course", "sync", "moodle", "a@x.edu", "pending", 2, "B"),
+            ("a_course2", "sync", "moodle", "a@x.edu", "pending", 3, "B"),
             ("a_new", "sync", "moodle", "a@x.edu", "pending", 2),
             ("b_pend", "sync", "moodle", "b@x.edu", "pending", 1),
             ("b_run", "sync", "moodle", "b@x.edu", "running", 2),
@@ -226,13 +228,14 @@ def test_0020_fails_duplicate_active_jobs_keeping_running_then_oldest(engine):
             ("a_class", "sync", "classroom", "a@x.edu", "pending", 3),
             ("a_pipe", "pipeline", "moodle", "a@x.edu", "pending", 3),
         ]
-        for name, typ, source, user, status, day in rows:
+        for name, typ, source, user, status, day, *course in rows:
+            course = f', "course_id": "{course[0]}"' if course else ""
             c.execute(
                 text("INSERT INTO jobs (id, type, payload, status, attempts, max_attempts, "
                      "error, created_at, available_at, updated_at) VALUES (:i, :t, :p, :s, "
                      "0, 3, :n, :d, :d, :d)"),
                 {"i": uuid.uuid4().hex, "t": typ, "s": status, "n": name,
-                 "p": f'{{"source": "{source}", "user_email": "{user}"}}',
+                 "p": f'{{"source": "{source}", "user_email": "{user}"{course}}}',
                  "d": f"2026-01-0{day}"},
             )
     _run(engine, m.upgrade)
@@ -242,5 +245,5 @@ def test_0020_fails_duplicate_active_jobs_keeping_running_then_oldest(engine):
         # error holds each row's name until the migration overwrites it
         kept = sorted(r[0] for r in c.execute(text(
             "SELECT error FROM jobs WHERE status IN ('pending', 'running')")))
-    assert failed == 2  # a_new, b_pend
-    assert kept == ["a_class", "a_old", "a_pipe", "b_run"]
+    assert failed == 3  # a_new, a_course2, b_pend
+    assert kept == ["a_class", "a_course", "a_old", "a_pipe", "b_run"]

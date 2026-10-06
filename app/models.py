@@ -244,13 +244,14 @@ class Job(SQLModel, table=True):
             postgresql_where=text(ACTIVE_NOTIFY_WHERE),
             sqlite_where=text(ACTIVE_NOTIFY_WHERE),
         ),
-        # At most one queued/running sync (or pipeline) job per source and
-        # user: two syncs racing each other can commit an older snapshot last
-        # and purge quiz items, review schedules with them (app.jobs._enqueue_once).
-        # `->>` works on Postgres json and SQLite >= 3.38 alike.
+        # At most one queued/running sync (or pipeline) job per source, user
+        # and course ('' for all courses), so repeat submissions don't pile
+        # up (app.jobs._enqueue_once); the sync handler runs them one at a
+        # time. `->>` works on Postgres json and SQLite >= 3.38 alike.
         Index(
             "uq_jobs_active_user_job", "type",
             text("(payload ->> 'source')"), text("(payload ->> 'user_email')"),
+            text("(COALESCE(payload ->> 'course_id', ''))"),
             unique=True,
             postgresql_where=text(ACTIVE_USER_JOB_WHERE),
             sqlite_where=text(ACTIVE_USER_JOB_WHERE),

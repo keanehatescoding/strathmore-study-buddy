@@ -2,133 +2,127 @@
 {% block title %}Settings — Strathmore Study Buddy{% endblock %}
 
 {% block body %}
-<section class="page-hero">
-  <div class="hero-content">
-    <h1 class="hero-title">Settings</h1>
-    <p class="hero-subtitle">
-      Study Buddy syncs your own Strathmore eLearning courses using a Moodle access key for your account,
-      and your Google Classroom classes using the access you granted at sign-in.
-    </p>
-  </div>
-</section>
+<header class="page-head">
+  <h1 class="page-title">Settings</h1>
+  <p class="page-lede">
+    Study Buddy syncs your Strathmore eLearning courses with a Moodle access key for your account,
+    and your Google Classroom classes with the access you granted at sign-in.
+  </p>
+</header>
 
 {% if flash %}
 <div class="notice notice-{{ flash.kind }}" role="status">{{ flash.text }}</div>
 {% endif %}
 
-<div class="card settings-card">
-  <div class="card-header">
-    <h2 class="card-title">Moodle</h2>
-    {% if connected %}
-      <span class="badge status-ok">Connected</span>
-    {% else %}
-      <span class="badge status-off">Not connected</span>
-    {% endif %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Moodle</h2>
+    {% if connected %}<span class="tag on">Connected</span>{% else %}<span class="tag off">Not connected</span>{% endif %}
   </div>
   {% if connected %}
-    <p class="settings-text">Your Moodle key is stored encrypted. Your courses sync daily.</p>
+    <p>Your Moodle key is stored encrypted. Your courses sync daily.</p>
     <form method="post" action="/settings/moodle/disconnect">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="btn btn-sm btn-outline">Disconnect Moodle</button>
+      <button type="submit" class="btn btn-small">Disconnect Moodle</button>
     </form>
   {% elif shared %}
-    <p class="settings-text">You're using the app's shared Moodle key. Connect your own account below so syncs run as you.</p>
+    <p>You're using the app's shared Moodle key. Connect your own account below so syncs run as you.</p>
   {% elif rejected %}
-    <p class="settings-text">Moodle stopped accepting your saved key (it expired or was revoked), so your courses aren't syncing. Connect again below.</p>
+    <p>Moodle stopped accepting your saved key (it expired or was revoked), so your courses aren't syncing. Connect again below.</p>
   {% elif stale %}
-    <p class="settings-text">Your saved key can't be read any more. Connect again below.</p>
+    <p>Your saved key can't be read any more. Connect again below.</p>
   {% else %}
-    <p class="settings-text">Connect with one of the options below to sync your courses.</p>
+    <p>Connect with one of the options below to sync your courses.</p>
   {% endif %}
-</div>
 
-<div class="settings-grid">
-  <div class="card settings-card">
-    <div class="card-header"><h2 class="card-title">Sign in with Moodle</h2></div>
-    <p class="settings-text">
-      We send your username and password to {{ moodle_url }} once to get an access key.
-      Your password is never saved.
-    </p>
-    <form method="post" action="/settings/moodle/login" autocomplete="off">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="field-label" for="moodle-username">Moodle username</label>
-      <input class="text-input" id="moodle-username" name="username" autocomplete="username" required>
-      <label class="field-label" for="moodle-password">Password</label>
-      <input class="text-input" id="moodle-password" name="password" type="password" autocomplete="current-password" required>
-      <button type="submit" class="btn btn-primary">Connect</button>
-    </form>
+  <div class="subpanels">
+    <div>
+      <h3>Sign in with Moodle</h3>
+      <p>
+        We send your username and password to {{ moodle_url }} once to get an access key.
+        Your password is never saved.
+      </p>
+      <form method="post" action="/settings/moodle/login" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="moodle-username">Moodle username</label>
+          <input class="text-input" id="moodle-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="moodle-password">Password</label>
+          <input class="text-input" id="moodle-password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Connect</button>
+      </form>
+    </div>
+
+    <div>
+      <h3>Or paste an access key</h3>
+      <p>
+        In Moodle, open <strong>Preferences → Security keys</strong> and copy the key for
+        <em>Moodle mobile web service</em>. (If it isn't listed, open the Moodle app once, or sign in instead.)
+      </p>
+      <form method="post" action="/settings/moodle/token" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="moodle-token">Access key</label>
+          <input class="text-input" id="moodle-token" name="token" spellcheck="false" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Save key</button>
+      </form>
+    </div>
   </div>
+</section>
 
-  <div class="card settings-card">
-    <div class="card-header"><h2 class="card-title">Paste an access key</h2></div>
-    <p class="settings-text">
-      In Moodle, open <strong>Preferences → Security keys</strong> and copy the key for
-      <em>Moodle mobile web service</em>. (If it isn't listed, open the Moodle app once, or use sign-in instead.)
-    </p>
-    <form method="post" action="/settings/moodle/token" autocomplete="off">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="field-label" for="moodle-token">Access key</label>
-      <input class="text-input" id="moodle-token" name="token" spellcheck="false" required>
-      <button type="submit" class="btn btn-primary">Save key</button>
-    </form>
-  </div>
-</div>
-
-<div class="card settings-card">
-  <div class="card-header">
-    <h2 class="card-title">Google Classroom</h2>
-    {% if google_connected %}
-      <span class="badge status-ok">Connected</span>
-    {% else %}
-      <span class="badge status-off">Not connected</span>
-    {% endif %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Google Classroom</h2>
+    {% if google_connected %}<span class="tag on">Connected</span>{% else %}<span class="tag off">Not connected</span>{% endif %}
   </div>
   {% if google_connected %}
-    <p class="settings-text">
+    <p>
       Your Google key is stored encrypted and lets Study Buddy read your Classroom classes and their Drive files.
       Revoking it stops Classroom syncs; signing in again reconnects.
     </p>
     <form method="post" action="/settings/google/disconnect">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="btn btn-sm btn-outline">Revoke Google access</button>
+      <button type="submit" class="btn btn-small">Revoke Google access</button>
     </form>
   {% elif google_shared %}
-    <p class="settings-text">You're using the app's shared Google key. Sign out and in again to connect your own.</p>
+    <p>You're using the app's shared Google key. Sign out and in again to connect your own.</p>
   {% elif google_stale %}
-    <p class="settings-text">Your saved Google key can't be read any more. Sign out and in again to reconnect.</p>
+    <p>Your saved Google key can't be read any more. Sign out and in again to reconnect.</p>
   {% else %}
-    <p class="settings-text">Not connected. Sign out and in again to grant Classroom access.</p>
+    <p>Not connected. Sign out and in again to grant Classroom access.</p>
   {% endif %}
-</div>
+</section>
 
-<div class="card settings-card">
-  <div class="card-header"><h2 class="card-title">Time zone</h2></div>
-  <p class="settings-text">
+<section class="panel">
+  <div class="panel-head"><h2>Time zone</h2></div>
+  <p>
     Your study day starts at midnight here: reviews fall due then, the daily
     new-item limit resets, and streaks count these days. Assignment due times show in this zone.
   </p>
   <form method="post" action="/settings/timezone">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label class="field-label" for="timezone">Time zone</label>
-    <select class="text-input" id="timezone" name="timezone">
-      {% for z in timezones %}
-        <option value="{{ z }}"{% if z == user_timezone %} selected{% endif %}>{{ z }}</option>
-      {% endfor %}
-    </select>
+    <div class="field">
+      <label for="timezone">Time zone</label>
+      <select class="text-input" id="timezone" name="timezone">
+        {% for z in timezones %}
+          <option value="{{ z }}"{% if z == user_timezone %} selected{% endif %}>{{ z }}</option>
+        {% endfor %}
+      </select>
+    </div>
     <button type="submit" class="btn btn-primary">Save time zone</button>
   </form>
-</div>
+</section>
 
-<div class="card settings-card">
-  <div class="card-header">
-    <h2 class="card-title">Email notifications</h2>
-    {% if notify_email %}
-      <span class="badge status-ok">On</span>
-    {% else %}
-      <span class="badge status-off">Off</span>
-    {% endif %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Email</h2>
+    {% if notify_email %}<span class="tag on">On</span>{% else %}<span class="tag off">Off</span>{% endif %}
   </div>
-  <p class="settings-text">
+  <p>
     New-material emails when your courses gain quiz items, and a daily reminder when reviews
     pile up. Reminders pause by themselves if you haven't studied in two weeks.
   </p>
@@ -140,5 +134,5 @@
     </label>
     <button type="submit" class="btn btn-primary">Save</button>
   </form>
-</div>
+</section>
 {% endblock %}

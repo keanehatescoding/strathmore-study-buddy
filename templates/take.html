@@ -1,145 +1,94 @@
 {% extends "base.html" %}
-{% block title %}Answer Question — Strathmore Study Buddy{% endblock %}
-
-{% block breadcrumbs %}
-<nav class="breadcrumb">
-  <a href="/">Courses</a>
-  <span class="breadcrumb-sep">/</span>
-  <a href="/review">Review Queue</a>
-  <span class="breadcrumb-sep">/</span>
-  <span class="breadcrumb-current">Question Practice</span>
-</nav>
-{% endblock %}
+{% block title %}Review — Strathmore Study Buddy{% endblock %}
 
 {% block body %}
-<div class="quiz-container">
-  <!-- Session Status -->
-  <div class="quiz-progress-bar">
-    <span>
-      <small>{{ remaining }} due after this one · <a href="/review">queue</a></small>
-    </span>
+<div class="quiz">
+  <div class="quiz-status">
+    <span>{{ remaining }} more due after this one · <a href="/review">queue</a></span>
     {% if not result and item.question_type == "mcq" %}
-    <span class="tip-text">
-      Tip: Press keys <kbd>1</kbd>–<kbd>{{ item.options|length }}</kbd> to choose
-    </span>
+    <span class="kbd-hint">Press <kbd>1</kbd>–<kbd>{{ item.options|length }}</kbd> to choose, <kbd>Enter</kbd> to submit</span>
+    {% elif result %}
+    <span class="kbd-hint">Press <kbd>Enter</kbd> for the next question</span>
     {% endif %}
   </div>
 
-  <!-- Main Question Card -->
-  <div class="quiz-card">
-    <div class="quiz-header">
-      <span class="badge badge-type">{{ item.question_type|upper }}</span>
-      <span class="badge difficulty">{{ item.difficulty }}</span>
+  <p class="quiz-kind">{{ "Multiple choice" if item.question_type == "mcq" else "Short answer" }} · {{ item.difficulty }}</p>
+  <h1 class="quiz-question">{{ item.question }}</h1>
+
+  {% if result %}
+  {% if item.question_type == "mcq" %}
+  <!-- The options again: the key and the user's pick -->
+  <ul class="options">
+    {% for o in item.options %}
+    {% set is_key = loop.index0 == result.correct_index %}
+    {% set is_pick = loop.index0 == result.chosen %}
+    <li class="reveal-option{% if is_key %} is-key{% elif is_pick %} is-wrong-pick{% endif %}">
+      <span class="option-key">{{ loop.index }}</span>
+      <span class="option-text">{{ o }}</span>
+      {% if is_key %}<span class="reveal-tag">Correct answer</span>{% endif %}
+      {% if is_pick %}<span class="reveal-tag">Your answer</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="answers">
+    {% if result.answer %}
+    <div class="answer-block">
+      <h3>Your answer</h3>
+      <p>{{ result.answer }}</p>
     </div>
+    {% endif %}
+    <div class="answer-block is-key">
+      <h3>Reference answer</h3>
+      <p>{{ item.correct_answer }}</p>
+    </div>
+  </div>
+  {% endif %}
 
-    <h1 class="quiz-question">{{ item.question }}</h1>
+  <section class="verdict {% if result.correct %}correct{% elif result.verdict == 'partial' %}partial{% else %}incorrect{% endif %}">
+    <h2>{{ "Correct" if result.correct else result.verdict|capitalize }}</h2>
+    <div class="feedback">{{ result.feedback }}</div>
+    <p class="next">Next review in {{ result.interval_days }} day{% if result.interval_days != 1 %}s{% endif %}.</p>
+  </section>
 
-    {% if result %}
+  {% if result.source %}
+  <p class="source-link">
+    Source:
+    <a href="/resources/{{ result.source.resource.id }}?chunk={{ result.source.chunk.id }}#source">{{ result.source.resource.title }} — {{ result.source.chunk.title }}</a>
+  </p>
+  {% endif %}
+
+  <div class="actions">
+    <a id="next-question-btn" href="/review/take" class="btn btn-primary">Next question</a>
+  </div>
+
+  {% else %}
+  {% if error %}
+  <div class="notice notice-error" role="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/review/{{ item.id }}/answer" class="answer-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
     {% if item.question_type == "mcq" %}
-    <!-- The options again: the key and the user's pick -->
-    <ul class="options-group reveal-options">
-      {% set letters = ["A", "B", "C", "D", "E", "F"] %}
+    <div class="options">
       {% for o in item.options %}
-      {% set is_key = loop.index0 == result.correct_index %}
-      {% set is_pick = loop.index0 == result.chosen %}
-      <li class="reveal-option{% if is_key %} is-key{% elif is_pick %} is-wrong-pick{% endif %}">
-        <span class="option-badge">{{ letters[loop.index0] if loop.index0 < 6 else loop.index }}</span>
+      <label class="option-label">
+        <input type="radio" name="answer" value="{{ loop.index0 }}"{% if answer == loop.index0|string %} checked{% endif %} required>
+        <span class="option-key">{{ loop.index }}</span>
         <span class="option-text">{{ o }}</span>
-        {% if is_key %}<span class="reveal-tag">Correct answer</span>{% endif %}
-        {% if is_pick %}<span class="reveal-tag">Your answer</span>{% endif %}
-      </li>
+      </label>
       {% endfor %}
-    </ul>
+    </div>
     {% else %}
-    <div class="reveal-answers">
-      {% if result.answer %}
-      <div class="reveal-block">
-        <h3 class="reveal-label">Your answer</h3>
-        <p class="reveal-text">{{ result.answer }}</p>
-      </div>
-      {% endif %}
-      <div class="reveal-block is-key">
-        <h3 class="reveal-label">Reference answer</h3>
-        <p class="reveal-text">{{ item.correct_answer }}</p>
-      </div>
+    <textarea name="answer" class="answer-textarea" rows="4" cols="60" maxlength="{{ max_answer_chars }}" required placeholder="Type your answer…" aria-label="Your answer">{{ answer }}</textarea>
+    <p class="answer-help">Graded on understanding, not exact wording.</p>
+    {% endif %}
+
+    <div class="actions">
+      <button type="submit" class="btn btn-primary">Submit</button>
+      <a href="/review">Back to queue</a>
     </div>
-    {% endif %}
-
-    <!-- Result / Evaluation Feedback Panel -->
-    <div class="result-panel {% if result.correct %}correct{% elif result.verdict == 'partial' %}partial{% else %}incorrect{% endif %}">
-      <h2 class="result-title">
-        {{ "✓ Correct" if result.correct else "✗ " + result.verdict|capitalize }}
-      </h2>
-      <div class="feedback-text">{{ result.feedback }}</div>
-      <p class="flush-bottom">
-        <small class="next-review-info">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect width="18" height="18" x="3" y="4" rx="2" ry="2"/>
-            <line x1="16" y1="2" x2="16" y2="6"/>
-            <line x1="8" y1="2" x2="8" y2="6"/>
-            <line x1="3" y1="10" x2="21" y2="10"/>
-          </svg>
-          Next review in {{ result.interval_days }} day(s).
-        </small>
-      </p>
-    </div>
-
-    {% if result.source %}
-    <p class="source-link">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
-        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
-      </svg>
-      Source:
-      <a href="/resources/{{ result.source.resource.id }}?chunk={{ result.source.chunk.id }}#source">{{ result.source.resource.title }} — {{ result.source.chunk.title }}</a>
-    </p>
-    {% endif %}
-
-    <div class="quiz-actions">
-      <a id="next-question-btn" href="/review/take" class="btn btn-lg btn-primary">
-        Next →
-      </a>
-      <span class="hint-text">
-        Press <kbd>Enter</kbd> or <kbd>Space</kbd> to advance
-      </span>
-    </div>
-
-    {% else %}
-    {% if error %}
-    <div class="notice notice-error" role="alert">{{ error }}</div>
-    {% endif %}
-    <!-- Answer Submission Form -->
-    <form method="post" action="/review/{{ item.id }}/answer" class="answer-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-
-      {% if item.question_type == "mcq" %}
-      <div class="options-group">
-        {% set letters = ["A", "B", "C", "D", "E", "F"] %}
-        {% for o in item.options %}
-        <label class="option-label">
-          <input type="radio" name="answer" value="{{ loop.index0 }}"{% if answer == loop.index0|string %} checked{% endif %} required>
-          <span class="option-badge">{{ letters[loop.index0] if loop.index0 < 6 else loop.index }}</span>
-          <span class="option-text">{{ o }}</span>
-        </label>
-        {% endfor %}
-      </div>
-      {% else %}
-      <div class="answer-field">
-        <textarea name="answer" class="answer-textarea" rows="4" cols="60" maxlength="{{ max_answer_chars }}" required placeholder="Type your answer…">{{ answer }}</textarea>
-        <p class="answer-help">
-          The AI grader checks your conceptual understanding leniently on phrasing.
-        </p>
-      </div>
-      {% endif %}
-
-      <div class="quiz-form-actions">
-        <button type="submit" class="btn btn-lg btn-primary">
-          Submit
-        </button>
-        <a href="/review" class="btn btn-outline">Back to Queue</a>
-      </div>
-    </form>
-    {% endif %}
-  </div>
+  </form>
+  {% endif %}
 </div>
 {% endblock %}

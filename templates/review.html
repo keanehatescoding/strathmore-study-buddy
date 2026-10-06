@@ -1,80 +1,33 @@
 {% extends "base.html" %}
 {% block title %}Review — Strathmore Study Buddy{% endblock %}
 
-{% block breadcrumbs %}
-<nav class="breadcrumb">
-  <a href="/">Courses</a>
-  <span class="breadcrumb-sep">/</span>
-  <span class="breadcrumb-current">Review Queue</span>
-</nav>
-{% endblock %}
-
 {% block body %}
 {% if items %}
-<!-- Active Review Hero -->
-<section class="review-hero">
-  <div class="review-hero-icon">
-    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="m13 2-2 2.5h3L11 8"/>
-      <circle cx="12" cy="14" r="8"/>
-      <polyline points="12 10 12 14 16 14"/>
-    </svg>
-  </div>
-  <h1 class="review-hero-title">Review queue ({{ items|length }} due)</h1>
-  <p class="review-hero-text">
-    Active recall with the SM-2 algorithm. Answer items before intervals decay to solidify core concepts.
-  </p>
-  <p>
-    <a href="/review/take" class="btn btn-lg btn-accent btn-hero">
-      Start reviewing →
-    </a>
-  </p>
-</section>
-
-<!-- Due Items Preview List -->
-<div class="section-block">
-  <div class="section-header">
-    <h2 class="queue-title">Items Due for Practice ({{ items|length }})</h2>
-    <span class="section-note">SM-2 Review Schedule</span>
-  </div>
-
-  <div class="queue-items-list">
-    {% for i in items %}
-    <div class="queue-item-card">
-      <div class="queue-item-main">
-        <span class="badge badge-type">{{ i.question_type|upper }}</span>
-        <span class="badge difficulty">{{ i.difficulty }}</span>
-        <span class="queue-item-question">
-          {{ i.question[:100] }}{% if i.question|length > 100 %}…{% endif %}
-        </span>
-      </div>
-      <a href="/review/take" class="btn btn-sm btn-outline no-shrink">Review</a>
-    </div>
-    {% endfor %}
-  </div>
+<div class="due-strip">
+  <p><strong>{{ items|length }}</strong> question{% if items|length != 1 %}s{% endif %} due</p>
+  <a href="/review/take" class="btn btn-primary">Start review</a>
 </div>
 
+<div class="section-head">
+  <h1 class="flush">Review queue</h1>
+</div>
+<ul class="rows queue">
+  {% for i in items %}
+  <li>
+    <span class="grow question">{{ i.question[:120] }}{% if i.question|length > 120 %}…{% endif %}</span>
+    <span class="tags">
+      <span class="tag">{{ "MCQ" if i.question_type == "mcq" else "Short" }}</span>
+      <span class="tag">{{ i.difficulty }}</span>
+    </span>
+  </li>
+  {% endfor %}
+</ul>
+
 {% else %}
-<!-- All Caught Up Hero -->
-<section class="review-hero">
-  <div class="review-hero-icon review-hero-icon-done">
-    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/>
-      <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/>
-      <path d="M4 22h16"/>
-      <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/>
-      <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/>
-      <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>
-    </svg>
-  </div>
-  <h1 class="review-hero-title">Nothing due. 🎉</h1>
-  <p class="review-hero-text review-hero-text-loose">
-    You're completely caught up! No flashcard reviews are due right now. Keep up your streak by checking in tomorrow or reviewing your performance statistics.
-  </p>
-  <div class="review-hero-actions">
-    <a href="/stats" class="btn btn-primary">View Study Stats</a>
-    <a href="/" class="btn btn-outline">Explore Courses</a>
-  </div>
-</section>
+<div class="empty">
+  <h1>Nothing due</h1>
+  <p>You're caught up. New reviews fall due at midnight.</p>
+  <p class="actions"><a href="/stats">See your stats</a> <a href="/">Browse courses</a></p>
+</div>
 {% endif %}
 {% endblock %}

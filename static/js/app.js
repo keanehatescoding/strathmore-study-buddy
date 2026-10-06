@@ -3,26 +3,27 @@
  */
 
 document.addEventListener('DOMContentLoaded', () => {
-  // 1. Instant Client-Side Course Search
+  // 1. Course filter (shown only on long course lists)
   const searchInput = document.getElementById('course-search');
   if (searchInput) {
-    const courseCards = document.querySelectorAll('.course-card-item');
+    const rows = document.querySelectorAll('.course-row');
     const emptyNotice = document.getElementById('search-empty-state');
 
     searchInput.addEventListener('input', (e) => {
       const query = e.target.value.toLowerCase().trim();
       let visibleCount = 0;
 
-      courseCards.forEach(card => {
-        const text = card.textContent.toLowerCase();
-        const matches = text.includes(query);
-        card.style.display = matches ? '' : 'none';
+      rows.forEach(row => {
+        const label = ['.code', '.name']
+          .map(sel => row.querySelector(sel)?.textContent ?? '')
+          .join(' ')
+          .toLowerCase();
+        const matches = label.includes(query);
+        row.hidden = !matches;
         if (matches) visibleCount++;
       });
 
-      if (emptyNotice) {
-        emptyNotice.style.display = (visibleCount === 0 && courseCards.length > 0) ? 'block' : 'none';
-      }
+      if (emptyNotice) emptyNotice.hidden = visibleCount > 0;
     });
   }
 
@@ -96,10 +97,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const flash = (label, ok) => {
       clearTimeout(resetTimer);
       copyBtn.innerHTML = label;
-      copyBtn.classList.toggle('btn-accent', ok);
+      copyBtn.classList.toggle('is-done', ok);
       resetTimer = setTimeout(() => {
         copyBtn.innerHTML = origLabel;
-        copyBtn.classList.remove('btn-accent');
+        copyBtn.classList.remove('is-done');
       }, 2000);
     };
 
@@ -131,7 +132,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pending = Promise.reject(err);
       }
       pending.then(
-        () => flash('✓ Copied!', true),
+        () => flash('Copied', true),
         (err) => {
           console.error('Failed to copy text', err);
           flash('Copy failed', false);

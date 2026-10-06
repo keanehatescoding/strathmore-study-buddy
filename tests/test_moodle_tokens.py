@@ -175,6 +175,18 @@ def test_connect_with_password_stores_encrypted_and_enqueues(testapp, monkeypatc
         assert [j.payload["user_email"] for j in jobs] == ["test@x.edu"]
 
 
+def test_reconnecting_moodle_does_not_stack_syncs(testapp, monkeypatch):
+    # a double-submitted form, or reconnecting before the first sync ran
+    client = testapp["client"]
+    monkeypatch.setattr(moodle_tokens, "verify_token", lambda base, t: {"fullname": "Test S"})
+    for _ in range(2):
+        client.post("/settings/moodle/token", data={
+            "csrf_token": _csrf(client), "token": "TOKEN"})
+    with testapp["Session"]() as s:
+        jobs = s.exec(select(Job)).all()
+        assert [(j.type, j.payload["source"]) for j in jobs] == [("sync", "moodle")]
+
+
 def test_moodle_password_attempts_are_limited(testapp, monkeypatch):
     # the form checks passwords against Moodle: without a tight limit it is
     # a password-guessing oracle for other students' accounts

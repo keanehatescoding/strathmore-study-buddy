@@ -35,6 +35,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, delete, exists, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
@@ -48,6 +49,8 @@ HEARTBEAT_EVERY = timedelta(minutes=1)
 RUNNING_TIMEOUT = timedelta(minutes=10)
 
 
+# A sync job that finds another sync of its source and user going waits this long.
+SYNC_BUSY_RETRY = timedelta(minutes=2)
 # A pipeline job that finds another run of its source going waits this long.
 PIPELINE_BUSY_RETRY = timedelta(minutes=30)
 # A pipeline job runs this long (plus the item in hand), then goes to the
@@ -97,21 +100,41 @@ def enqueue(
 
 def _enqueue_once(session: Session, job_type: str, source: str, user_email: str,
                   payload: dict) -> Job | None:
-    """Queue `job_type` unless one is already pending or running for this
-    source and user. Returns the new job, or None."""
+    """Queue `job_type` unless an active job for this source and user
+    already covers it: one for the same course (payload's course_id, None
+    for all of them), or a pending one for all courses. Returns the new job,
+    or None. The check is only a fast path: uq_jobs_active_user_job settles
+    two callers that both pass it."""
     active = session.exec(
         select(Job).where(Job.type == job_type, Job.status.in_(("pending", "running")))
     ).all()
+    course_id = payload.get("course_id")
     if any(j.payload.get("source") == source and j.payload.get("user_email") == user_email
+           and (j.payload.get("course_id") == course_id
+                or j.status == "pending" and j.payload.get("course_id") is None)
            for j in active):
         return None
-    return enqueue(session, job_type, {"source": source, "user_email": user_email, **payload})
+    job = Job(type=job_type, payload={"source": source, "user_email": user_email, **payload})
+    try:
+        # a savepoint, so losing the race undoes only this insert and not
+        # whatever else the caller has pending in the session
+        with session.begin_nested():
+            session.add(job)
+    except IntegrityError:  # lost the race to another enqueue
+        return None
+    session.commit()
+    session.refresh(job)
+    return job
 
 
-def enqueue_sync_once(session: Session, source: str, user_email: str) -> Job | None:
-    """Queue a full sync of `source` for the user unless one is already
-    pending or running for them. Returns the new job, or None."""
-    return _enqueue_once(session, "sync", source, user_email, {"course_id": None})
+def enqueue_sync_once(session: Session, source: str, user_email: str,
+                      course_id: str | None = None) -> Job | None:
+    """Queue a sync of `source` for the user (one course, or all when
+    `course_id` is None) unless one already pending or running covers it
+    (see _enqueue_once). Syncs of different courses can both be queued;
+    the handler runs one at a time per source and user. Returns the new
+    job, or None."""
+    return _enqueue_once(session, "sync", source, user_email, {"course_id": course_id})
 
 
 def sync_state(session: Session, user: User) -> str:
@@ -340,7 +363,20 @@ def run_due(session: Session, limit: int = 5) -> dict:
 
 @handler("sync")
 def run_sync_job(session: Session, payload: dict) -> dict:
-    """payload: {source, course_id|None, user_email}."""
+    """payload: {source, course_id|None, user_email}. Waits (Defer) while
+    another sync of the user's source runs: two syncs racing each other can
+    commit an older snapshot last and purge quiz items, review schedules
+    with them."""
+    from app.pipeline import advisory_lock
+
+    name = f"app.sync:{payload['source']}:{payload['user_email']}"
+    with advisory_lock(name, session.get_bind()) as got:
+        if not got:
+            raise Defer(SYNC_BUSY_RETRY, "another sync of this source and user is running")
+        return _sync(session, payload)
+
+
+def _sync(session: Session, payload: dict) -> dict:
     from google.auth.exceptions import RefreshError
 
     from app.auth import find_user, forget_revoked_token, refresh_token_for

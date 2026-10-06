@@ -592,6 +592,24 @@ def test_pipeline_job_defers_behind_a_real_pipeline_lock(session, pipeline_user,
     assert run_due(session)["completed"] == 1  # lock released: it runs
 
 
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="advisory locks need Postgres")
+def test_sync_job_defers_while_another_sync_of_the_user_runs(session, monkeypatch):
+    import app.jobs as jobs
+    import app.pipeline as pipeline
+
+    monkeypatch.setattr(jobs, "_sync", lambda session, payload: {})
+    job = enqueue(session, "sync", {"source": "moodle", "user_email": "s@x.edu",
+                                    "course_id": "B"})
+    other = enqueue(session, "sync", {"source": "moodle", "user_email": "o@x.edu",
+                                      "course_id": None})
+    with pipeline.advisory_lock("app.sync:moodle:s@x.edu", make_engine()) as held:
+        assert held  # e.g. a course A sync of the same user mid-run
+        assert run_due(session) == {"deferred": 1, "completed": 1}
+    assert session.get(Job, other.id).status == "completed"
+    _set(session, session.get(Job, job.id), available_at=datetime.now(timezone.utc))
+    assert run_due(session)["completed"] == 1  # lock released: it runs
+
+
 @pytest.mark.parametrize("setup, title", [
     ("none", "No account connected"),
     ("pending", "Your courses are syncing"),

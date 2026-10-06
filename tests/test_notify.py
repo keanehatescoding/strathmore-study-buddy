@@ -217,6 +217,17 @@ def test_render_review_due():
     assert "https://sb.example.com/review" in body and "localhost" not in body
 
 
+def test_render_singular_counts():
+    uid = "00000000-0000-0000-0000-000000000000"
+    subject, body = notify.render(NotificationEvent(
+        user_id=uid, type="review_due", payload={"due_count": 1}), "https://sb/")
+    assert subject == "1 review due" and "You have 1 quiz item due" in body
+    _, body = notify.render(NotificationEvent(
+        user_id=uid, type="new_material",
+        payload={"new_items": 1, "course": "Maths"}), "https://sb/")
+    assert body.startswith("1 new quiz item from Maths.")
+
+
 def test_render_uses_app_base_url_setting(monkeypatch):
     from app.config import settings
 
@@ -274,7 +285,7 @@ def test_send_batches_requests(session, monkeypatch):
 
 def test_bad_email_in_batch_does_not_block_others(session, monkeypatch):
     def reject_bad(emails):
-        if any(e["subject"] == "1 reviews due" for e in emails):
+        if any(e["subject"] == "1 review due" for e in emails):
             raise notify.EmailError("resend returned 422", "http_422:validation_error")
 
     calls = _fake_batches(monkeypatch, reject_bad)

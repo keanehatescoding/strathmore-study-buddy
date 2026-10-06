@@ -232,6 +232,10 @@ def unsubscribe_url(event: NotificationEvent, base_url: str,
     return f"{base_url.rstrip('/')}/unsubscribe/{unsubscribe_token(event.user_id, secret_key)}"
 
 
+def _items(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def render(event: NotificationEvent, base_url: str | None = None,
            secret_key: str | None = None) -> tuple[str, str]:
     if base_url is None:
@@ -245,14 +249,14 @@ def render(event: NotificationEvent, base_url: str | None = None,
         p = event.payload
         return (
             f"New study material: {p.get('code') or p.get('course')}",
-            f"{p['new_items']} new quiz items from {p.get('course')}.\n"
+            f"{_items(p['new_items'], 'new quiz item')} from {p.get('course')}.\n"
             f"Review them: {review_url}{footer}",
         )
     if event.type == "review_due":
         n = event.payload.get("due_count", 0)
         return (
-            f"{n} reviews due",
-            f"You have {n} quiz items due for review.\n"
+            f"{_items(n, 'review')} due",
+            f"You have {_items(n, 'quiz item')} due for review.\n"
             f"Catch up: {review_url}{footer}",
         )
     raise EmailError(f"unknown event type {event.type!r}", "unknown_event_type")

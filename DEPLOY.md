@@ -106,9 +106,13 @@ The pipeline runs from cron (or by hand for a backfill). The one exception
 is a user's first sync: when none of their courses for that source has been
 chunked yet, the sync job queues a `pipeline` job scoped to their courses
 (paced by `LLM_PACE`), so their first quizzes come within the hour rather
-than the next morning. It runs in the worker, which handles nothing else
-until it finishes; on shared course material it mostly copies another
-user's results. Only one run per source goes at a time (a Postgres advisory
+than the next morning. It runs in the worker in 10-minute slices
+(`PIPELINE_SLICE` in `app/jobs.py`): when a slice is used up it stops
+between items and goes to the back of the queue, so other students'
+sign-in syncs and the hourly notifications run in between instead of
+waiting hours. Notifications don't wait for a pipeline job at all, only
+for syncs. On shared course material it mostly copies another user's
+results. Only one run per source goes at a time (a Postgres advisory
 lock): a cron run that starts while the previous one is still going prints
 "another … pipeline run is in progress" and exits 0; one that finds a
 `pipeline` job running waits for it instead (best effort: the job status

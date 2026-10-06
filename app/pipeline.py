@@ -47,11 +47,23 @@ class StageResult:
 
     counts: Counter[str] = field(default_factory=Counter)
     quota_exhausted: bool = False
+    out_of_time: bool = False  # stopped at its deadline; a re-run resumes
 
     def __str__(self) -> str:
         out = ", ".join(f"{k}={v}" for k, v in self.counts.items())
-        return out + (" (quota_exhausted: stopped, re-run to resume)"
-                      if self.quota_exhausted else "")
+        if self.quota_exhausted:
+            out += " (quota_exhausted: stopped, re-run to resume)"
+        if self.out_of_time:
+            out += " (out of time: stopped, re-run to resume)"
+        return out
+
+
+def _past(deadline: float | None, result: StageResult) -> bool:
+    """Whether a stage should stop before its next item: every item commits
+    on its own, so stopping between items loses nothing."""
+    if deadline is not None and time.monotonic() >= deadline:
+        result.out_of_time = True
+    return result.out_of_time
 
 
 def _scoped(q, course_id, source):
@@ -192,11 +204,14 @@ def _share_failed(session: Session, rid, e: Exception, counts) -> Resource | Non
 
 
 def run_extraction(session: Session, downloader, course_id=None,
-                   downloader_for=None, source=None) -> StageResult:
+                   downloader_for=None, source=None,
+                   deadline: float | None = None) -> StageResult:
     result = StageResult(Counter(extracted=0, skipped=0, failed=0))
     counts = result.counts
     ids = pending_resource_ids(session, course_id, source)
     for i, rid in enumerate(ids, 1):
+        if _past(deadline, result):
+            break
         r = session.get(Resource, rid)
         seen_hash = r.content_hash  # what the text will be of
         dl = downloader_for(r) if downloader_for else downloader
@@ -265,7 +280,7 @@ def run_extraction(session: Session, downloader, course_id=None,
 
 
 def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
-                 source=None) -> StageResult:
+                 source=None, deadline: float | None = None) -> StageResult:
     result = StageResult(Counter(chunks=0, cached=0, resources=0))
     counts = result.counts
     ids = chunkable_resource_ids(session, course_id, source)
@@ -278,6 +293,10 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
         if has_chunks and r.status == "extracted":
             counts["cached"] += 1
             continue
+        # after the cached skip: a slice must reach real work, or each
+        # re-run would spend its time re-walking chunked resources
+        if _past(deadline, result):
+            break
         try:
             shared = copy_chunks(session, r)
         except ContentChanged:
@@ -366,7 +385,7 @@ def _quiz_failed(session: Session, chunk_id, attempt: int, e: Exception) -> int:
 
 
 def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
-             pace: float = 0.0, source=None) -> StageResult:
+             pace: float = 0.0, source=None, deadline: float | None = None) -> StageResult:
     from uuid import UUID
 
     from app.notify import course_of_chunk, enqueue_new_material
@@ -380,6 +399,8 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
         course_id, source,
     )).one() - len(ids)
     for chunk_id in ids:
+        if _past(deadline, result):
+            break
         chunk = session.get(Chunk, chunk_id)
         if chunk is None:
             counts["changed"] += 1  # dropped by a resync since it was listed
@@ -489,21 +510,29 @@ def llm_clients():
 
 
 def run_course(session: Session, source: str, course_id, chunk_llm=None, quiz_llm=None,
-               pace: float = 0.0, stages=STAGES) -> dict[str, StageResult]:
+               pace: float = 0.0, stages=STAGES,
+               deadline: float | None = None) -> dict[str, StageResult]:
     """Run `stages` in order over one course (None = every course of `source`),
-    printing each tally as it finishes. The caller holds single_run(source)."""
+    printing each tally as it finishes. The caller holds single_run(source).
+    Past `deadline` (a time.monotonic() value) the running stage stops
+    between items and later stages are skipped; see StageResult.out_of_time."""
     out: dict[str, StageResult] = {}
-    if "extraction" in stages:
-        out["extraction"] = run_extraction(session, None, course_id,
-                                           DOWNLOADERS_FOR[source](session), source=source)
-        print("extraction:", out["extraction"], flush=True)
-    if "chunking" in stages:
-        out["chunking"] = run_chunking(session, chunk_llm, course_id, pace=pace,
-                                       source=source)
-        print("chunking:", out["chunking"], flush=True)
-    if "quiz" in stages:
-        out["quiz"] = run_quiz(session, quiz_llm, course_id, pace=pace, source=source)
-        print("quiz:", out["quiz"], flush=True)
+    for name in STAGES:
+        if name not in stages:
+            continue
+        if name == "extraction":
+            r = run_extraction(session, None, course_id, DOWNLOADERS_FOR[source](session),
+                               source=source, deadline=deadline)
+        elif name == "chunking":
+            r = run_chunking(session, chunk_llm, course_id, pace=pace, source=source,
+                             deadline=deadline)
+        else:
+            r = run_quiz(session, quiz_llm, course_id, pace=pace, source=source,
+                         deadline=deadline)
+        out[name] = r
+        print(f"{name}:", r, flush=True)
+        if r.out_of_time:
+            break
     return out
 
 

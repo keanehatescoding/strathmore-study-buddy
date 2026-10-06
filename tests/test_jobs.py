@@ -535,7 +535,7 @@ def _fake_pipeline(monkeypatch, quota_on=None, got=True):
 
     ran: list = []
 
-    def run_course(s, source, course_id, chunk_llm, quiz_llm, pace=0.0):
+    def run_course(s, source, course_id, chunk_llm, quiz_llm, pace=0.0, deadline=None):
         ran.append((source, course_id))
         r = StageResult()
         r.counts["chunks"] = 2
@@ -637,3 +637,88 @@ def test_empty_course_list_explains_why(testapp, monkeypatch, setup, title):
         s.commit()
     page = testapp["client"].get("/").text
     assert "Maths" in page and title not in page
+
+
+def test_job_deferred_by_zero_goes_behind_due_jobs(session, monkeypatch):
+    order: list = []
+
+    def once(s, payload):
+        order.append("slice")
+        if order.count("slice") == 1:
+            raise jobs.Defer(timedelta(0), "slice used up")
+
+    monkeypatch.setitem(HANDLERS, "slow", once)
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: order.append("fake"))
+    enqueue(session, "slow", {})
+    enqueue(session, "fake", {"n": 1})  # queued later, but due before the hand-back
+    out = run_due(session)
+    assert out["deferred"] == 1 and out["completed"] == 2
+    assert order == ["slice", "fake", "slice"]
+
+
+def test_notify_does_not_wait_for_a_pipeline_job(session, monkeypatch):
+    order: list = []
+    monkeypatch.setitem(HANDLERS, "send_notifications", lambda s, p: order.append("notify"))
+    pipeline_job = enqueue(session, "pipeline", {"source": "moodle", "user_email": "s@x.edu"})
+    _set(session, pipeline_job, status="running", attempts=1)  # mid-slice elsewhere
+    enqueue(session, "send_notifications")
+    assert run_due(session)["completed"] == 1 and order == ["notify"]
+
+
+def test_pipeline_job_runs_in_slices_behind_other_jobs(session, monkeypatch):
+    import time
+    from collections import Counter
+
+    import app.pipeline as pipeline
+    from app.config import settings
+    from app.models import Chunk, Course, QuizItem, Resource, Topic, User
+    from tests.test_pipeline import FakeLLM as ChunkLLM
+    from tests.test_quiz import GOOD
+    from tests.test_quiz import FakeLLM as QuizLLM
+
+    user = User(email="s@x.edu")
+    session.add(user)
+    session.commit()
+    course = Course(source="moodle", source_id="c1", name="C", user_id=user.id)
+    session.add(course)
+    session.commit()
+    topic = Topic(course_id=course.id, source_id="t1", title="T")
+    session.add(topic)
+    session.commit()
+    for i in range(3):
+        session.add(Resource(topic_id=topic.id, source="moodle", source_id=f"r{i}",
+                             type="file", title=f"R{i}", status="extracted",
+                             extracted_text=f"Section {i} about trees and graphs."))
+    session.commit()
+
+    ticks = iter(range(10**6))
+    monkeypatch.setattr(time, "monotonic", lambda: float(next(ticks)))
+    monkeypatch.setattr(jobs, "PIPELINE_SLICE", timedelta(seconds=2.5))  # ~2 items a slice
+    monkeypatch.setattr(settings, "llm_pace", 0.0)
+    monkeypatch.setattr(pipeline, "llm_clients", lambda: (ChunkLLM(), QuizLLM(GOOD[:2])))
+    ran: list = []
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: ran.append(p))
+
+    job = enqueue(session, "pipeline", {"source": "moodle", "user_email": "s@x.edu"})
+    enqueue(session, "fake", {"n": 1})  # e.g. another student's sign-in sync
+    assert run_due(session, limit=1)["deferred"] == 1  # first slice, handed back
+    assert run_due(session, limit=1)["completed"] == 1 and ran == [{"n": 1}]
+
+    slices = 1
+    while True:
+        session.expire_all()
+        if session.get(Job, job.id).status != "pending":
+            break
+        run_due(session, limit=1)
+        slices += 1
+        assert slices < 20
+    session.expire_all()
+    row = session.get(Job, job.id)
+    assert row.status == "completed" and row.attempts == 1  # deferrals refunded
+    assert slices > 2
+    chunks = session.exec(select(Chunk)).all()
+    assert len(chunks) == 3  # short texts: one chunk per resource, none twice
+    assert len({c.resource_id for c in chunks}) == 3
+    items = session.exec(select(QuizItem)).all()
+    assert len(items) == 6  # 2 per chunk, none twice
+    assert sorted(Counter(i.chunk_id for i in items).values()) == [2, 2, 2]

@@ -25,6 +25,8 @@ jobs:
       DEV: "1"  # the public default SECRET_KEY is fine for tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.12.21"
@@ -50,6 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: docker build -t study-buddy .
       - name: runs as non-root and imports
         run: |

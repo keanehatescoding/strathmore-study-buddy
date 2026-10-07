@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
-from app.extract import is_cap_note
+from app.extract import cap_text, is_cap_note
 from app.models import Chunk, QuizAttempt, QuizItem, Resource
 
 
@@ -56,9 +56,10 @@ def copy_extraction(session: Session, r: Resource, downloader=None) -> bool:
     with texts:  # closes the server-side cursor when a donor is found early
         for text, error in texts:
             if text.strip():
-                r.extracted_text = text
+                # a donor extracted before the cap may be over it
+                r.extracted_text, note = cap_text(text)
                 r.status = "extracted"
-                r.error = error if is_cap_note(error) else None
+                r.error = note or (error if is_cap_note(error) else None)
                 return True
     return False
 

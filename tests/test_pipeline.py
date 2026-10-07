@@ -454,9 +454,20 @@ def test_truncated_section_is_halved_and_retried():
     from app.chunk import chunk_sections
 
     llm = TruncatingLLM(1500)
-    out = chunk_sections(["para\n\n" * 500], llm)  # 3000 chars
-    assert out and llm.sizes[0] == 3000
+    out, left = chunk_sections(["para\n\n" * 500], llm)  # 3000 chars
+    assert out and not left and llm.sizes[0] == 3000
     assert all(s <= 1500 for s in llm.sizes[1:])
+
+
+def test_retried_halves_count_against_the_call_budget():
+    from app.chunk import chunk_sections
+
+    llm = TruncatingLLM(1500)
+    # every section truncates once, so each costs three calls
+    out, left = chunk_sections(["para\n\n" * 500] * 4, llm, max_calls=5)
+    assert len(llm.sizes) == 5
+    assert left == 3  # the second section is only half studied
+    assert out
 
 
 def test_truncation_on_a_small_section_raises():
@@ -480,8 +491,8 @@ def test_malformed_chunks_are_dropped_not_crashed_on():
     from app.chunk import chunk_sections
 
     good = {"title": "T", "content": "real text"}
-    assert chunk_sections(["s"], MessyLLM("oops")) == []
-    out = chunk_sections(["s"], MessyLLM([
+    assert chunk_sections(["s"], MessyLLM("oops")) == ([], 0)
+    out, _ = chunk_sections(["s"], MessyLLM([
         "a string", None, {"title": "no content"}, {"content": None},
         {"content": ["list"]}, {"title": None, "content": "untitled ok"}, good,
     ]))

@@ -4,8 +4,9 @@
   before chunking, since chunk quality degrades on very long inputs. Text
   without blank lines (transcripts) falls back to lines, then spaces. A
   section whose reply is truncated is halved and retried.
-- At most MAX_SECTIONS sections are sent, a backstop behind the extraction
-  cap (app.extract.MAX_EXTRACTED_CHARS) for text extracted before it.
+- At most MAX_SECTIONS calls are made per resource, retried halves included:
+  a backstop behind the extraction cap (app.extract.MAX_EXTRACTED_CHARS) for
+  text extracted before it, and for replies that keep truncating.
 - Short texts skip the LLM entirely (single chunk, no cost).
 - Cache: resources that already have chunks and status "extracted" are
   skipped; status "pending" with stale chunks means content changed ->
@@ -25,7 +26,8 @@ from app.llm_schemas import ChunkReply
 from app.models import Chunk
 
 MAX_SECTION_CHARS = 10000
-# presplit packs paragraphs greedily, so capped text stays well under this
+# LLM calls per resource; presplit packs paragraphs greedily, so capped text
+# stays well under this
 MAX_SECTIONS = 100
 MIN_LLM_CHARS = 300
 MIN_SPLIT_CHARS = 1000  # a truncated reply on a shorter section is an error
@@ -103,9 +105,17 @@ def locate(content: str, full: str) -> tuple[int | None, int | None]:
     return start_orig, end_orig
 
 
-def chunk_sections(sections: list[str], llm: LLMClient) -> list[dict]:
-    out = []
-    for i, section in enumerate(sections):
+def chunk_sections(sections: list[str], llm: LLMClient,
+                   max_calls: int = MAX_SECTIONS) -> tuple[list[dict], int]:
+    """Chunk sections in order with at most max_calls LLM calls, halves of a
+    truncated section included. Returns (chunks, sections left unstudied)."""
+    out, calls = [], 0
+    todo = [(i, s) for i, s in reversed(list(enumerate(sections)))]  # a stack
+    while todo:
+        if calls >= max_calls:
+            return out, len({i for i, _ in todo})
+        i, section = todo.pop()
+        calls += 1
         try:
             data = llm.complete_json(
                 SYSTEM,
@@ -117,10 +127,11 @@ def chunk_sections(sections: list[str], llm: LLMClient) -> list[dict]:
             if len(section) < MIN_SPLIT_CHARS:
                 raise
             # the reply outgrew the output limit: two halves fit
-            out.extend(chunk_sections(presplit(section, len(section) // 2 + 1), llm))
+            halves = presplit(section, len(section) // 2 + 1)
+            todo.extend((i, h) for h in reversed(halves))
             continue
         out.extend(c.model_dump() for c in ChunkReply.model_validate(data).chunks)
-    return out
+    return out, 0
 
 
 def needs_llm(resource) -> bool:
@@ -154,11 +165,10 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
         items = []
     elif needs_llm(resource):
         sections = presplit(text)
-        if len(sections) > MAX_SECTIONS:
-            note = (f"{CAPPED_PREFIX}{MAX_SECTIONS} of {len(sections)} sections "
-                    "are studied: the rest is past the size cap")
-            sections = sections[:MAX_SECTIONS]
-        items = chunk_sections(sections, llm)  # paid work: before any delete
+        items, left = chunk_sections(sections, llm)  # paid work: before any delete
+        if left:
+            note = (f"{CAPPED_PREFIX}{len(sections) - left} of {len(sections)} "
+                    "sections are studied: the rest is past the size cap")
         if not items:
             raise ChunkingError("chunker produced no chunks")
     else:

@@ -323,3 +323,19 @@ def test_settings_page_explains_a_rejected_key(testapp):
     page = testapp["client"].get("/settings/moodle")
     assert "Not connected" in page.text
     assert "Moodle stopped accepting your saved key" in page.text
+
+
+@pytest.mark.parametrize("raw, browser", [
+    ("https://m.example/webservice/pluginfile.php/12/mod_resource/content/0/a.pdf",
+     "https://m.example/pluginfile.php/12/mod_resource/content/0/a.pdf"),
+    ("https://m.example/moodle/webservice/pluginfile.php/12/mod_folder/content/0/b.pdf"
+     "?forcedownload=1&token=abc",
+     "https://m.example/moodle/pluginfile.php/12/mod_folder/content/0/b.pdf"),
+    ("https://m.example/pluginfile.php/1/a.pdf?token=abc&rev=3",
+     "https://m.example/pluginfile.php/1/a.pdf?rev=3"),
+    ("https://m.example/mod/page/view.php?id=7", "https://m.example/mod/page/view.php?id=7"),
+])
+def test_browser_url(raw, browser):
+    from app.moodle import browser_url
+
+    assert browser_url(raw) == browser

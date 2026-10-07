@@ -12,7 +12,7 @@
   <h1 class="page-title">{{ resource.title }}</h1>
   <p class="page-meta">
     {{ resource.type }}{% if resource.mime_type %} · {{ resource.mime_type }}{% endif %} · <span class="tag {{ resource.status }}">{{ resource.status }}</span>
-    {% if resource.raw_url %}<br><a href="{{ resource.raw_url }}" target="_blank" rel="noopener">Open the original</a>{% endif %}
+    {% if original_url %}<br><a href="{{ original_url }}" target="_blank" rel="noopener">Open the original</a>{% endif %}
   </p>
   {% if resource.error %}
   <p class="resource-error">{{ resource.error }}</p>

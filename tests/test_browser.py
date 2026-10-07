@@ -181,3 +181,36 @@ def test_course_page_groups_past_assignments(testapp):
     upcoming, _, past = page.partition("Past assignments (1)")
     assert "Next essay" in upcoming and "Old essay" not in upcoming
     assert "Old essay" in past
+
+
+def _resource_with_url(testapp, source, type_, raw_url):
+    Session = testapp["Session"]
+    with Session() as s:
+        course = Course(user_id=testapp["user_id"], source=source, source_id="c3",
+                        name="CS 303")
+        s.add(course)
+        s.commit()
+        topic = Topic(course_id=course.id, source_id="t3", title="Heaps", order=0)
+        s.add(topic)
+        s.commit()
+        res = Resource(topic_id=topic.id, source=source, source_id="r3", type=type_,
+                       title="heaps", status="pending", raw_url=raw_url)
+        s.add(res)
+        s.commit()
+        return str(res.id)
+
+
+def test_moodle_file_links_the_browser_url(testapp):
+    rid = _resource_with_url(
+        testapp, "moodle", "file",
+        "https://m.example/moodle/webservice/pluginfile.php/9/mod_resource/content/1/h.pdf",
+    )
+    page = testapp["client"].get(f"/resources/{rid}").text
+    assert 'href="https://m.example/moodle/pluginfile.php/9/mod_resource/content/1/h.pdf"' in page
+    assert "webservice" not in page
+
+
+def test_other_original_links_unchanged(testapp):
+    url = "https://drive.google.com/file/d/abc/view"
+    rid = _resource_with_url(testapp, "classroom", "file", url)
+    assert f'href="{url}"' in testapp["client"].get(f"/resources/{rid}").text

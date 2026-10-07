@@ -137,6 +137,30 @@ class MoodleClient:
         return blob, mime
 
 
+_WS_FILES = "/webservice/pluginfile.php/"
+_FILES = "/pluginfile.php/"
+_TOKEN_PARAMS = {"token", "wstoken", "forcedownload"}
+
+
+def browser_url(fileurl: str) -> str:
+    """The URL a signed-in student opens for a webservice fileurl.
+
+    /webservice/pluginfile.php/ serves only with a token, which must never
+    reach a link; /pluginfile.php/ serves the same file to the browser's own
+    Moodle session. Token/forcedownload query params are dropped. Anything that
+    isn't a pluginfile URL comes back unchanged."""
+    url = urllib.parse.urlsplit(fileurl)
+    head, ws, tail = url.path.partition(_WS_FILES)
+    path = f"{head}{_FILES}{tail}" if ws else url.path
+    if _FILES not in path:
+        return fileurl
+    query = urllib.parse.urlencode([
+        (k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True)
+        if k.lower() not in _TOKEN_PARAMS
+    ])
+    return urllib.parse.urlunsplit(url._replace(path=path, query=query))
+
+
 # -- adapter: API responses -> app.sync dataclasses ----------------------------
 
 from app.sync import (  # noqa: E402

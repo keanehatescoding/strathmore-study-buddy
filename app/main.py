@@ -48,6 +48,7 @@ from app.models import (
     Topic,
     User,
 )
+from app.moodle import browser_url
 from app.security import RateLimitMiddleware, SecurityHeadersMiddleware, hit_table
 from app.stats import compute_stats
 
@@ -485,6 +486,14 @@ def source_passage(text: str | None, chunk: Chunk) -> dict:
     }
 
 
+def _original_url(resource: Resource) -> str | None:
+    """Where "Open the original" points. A Moodle file's raw_url is a
+    webservice URL that needs the token, so link its browser form instead."""
+    if resource.raw_url and resource.source == "moodle" and resource.type == "file":
+        return browser_url(resource.raw_url)
+    return resource.raw_url
+
+
 @app.get("/resources/{resource_id}", response_class=HTMLResponse)
 def resource_detail(
     resource_id: UUID,
@@ -509,6 +518,7 @@ def resource_detail(
             "chunks": chunks,
             "source": source,
             "passage": source_passage(resource.extracted_text, source) if source else None,
+            "original_url": _original_url(resource),
             "preview_chars": RESOURCE_PREVIEW_CHARS,
             "user": user,
             "active_page": "courses",

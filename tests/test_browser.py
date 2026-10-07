@@ -129,3 +129,55 @@ def _course_page_selects(testapp, n_topics):
 
 def test_course_page_queries_do_not_grow_with_topics(testapp):
     assert _course_page_selects(testapp, 1) == _course_page_selects(testapp, 5)
+
+
+def test_split_assignments_by_local_day():
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    from app.main import split_assignments
+    from app.models import Assignment
+
+    nairobi = ZoneInfo("Africa/Nairobi")  # UTC+3
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)  # 12:00 local
+
+    def a(title, due):
+        return Assignment(course_id=None, source_id=title, title=title, due_date=due)
+
+    later = a("later", now + timedelta(days=5))
+    soon = a("soon", now + timedelta(days=1))
+    # due 07:00 local today: already past the hour, but today's work is still shown
+    this_morning = a("this morning", datetime(2026, 10, 7, 4, 0, tzinfo=timezone.utc))
+    last_week = a("last week", now - timedelta(days=7))
+    yesterday = a("yesterday", datetime(2026, 10, 6, 20, 0, tzinfo=timezone.utc))
+    undated = a("undated", None)
+    naive = a("naive", datetime(2026, 10, 9))  # SQLite hands back naive UTC
+
+    upcoming, past = split_assignments(
+        [later, last_week, undated, soon, yesterday, this_morning, naive], nairobi, now)
+    assert [x.title for x in upcoming] == ["this morning", "soon", "naive", "later", "undated"]
+    assert [x.title for x in past] == ["yesterday", "last week"]
+
+
+def test_course_page_groups_past_assignments(testapp):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import Assignment
+
+    now = datetime.now(timezone.utc)
+    with testapp["Session"]() as s:
+        course = Course(user_id=testapp["user_id"], source="moodle", source_id="c1", name="C")
+        s.add(course)
+        s.commit()
+        s.add_all([
+            Assignment(course_id=course.id, source_id="a1", title="Old essay",
+                       due_date=now - timedelta(days=30)),
+            Assignment(course_id=course.id, source_id="a2", title="Next essay",
+                       due_date=now + timedelta(days=3)),
+        ])
+        s.commit()
+        cid = course.id
+    page = testapp["client"].get(f"/courses/{cid}").text
+    upcoming, _, past = page.partition("Past assignments (1)")
+    assert "Next essay" in upcoming and "Old essay" not in upcoming
+    assert "Old essay" in past

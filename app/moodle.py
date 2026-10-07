@@ -142,6 +142,7 @@ class MoodleClient:
 from app.sync import (  # noqa: E402
     AssignmentData,
     CourseData,
+    PartialAssignments,
     ResourceData,
     TopicData,
     link_type,
@@ -343,4 +344,6 @@ class MoodleAdapter:
                         description=a.get("intro"),
                     )
                 )
-        return out
+        # warnings ride along with a 200 (e.g. no access to some context):
+        # keep what came back, but don't treat it as the full list
+        return PartialAssignments(out) if resp.get("warnings") else out

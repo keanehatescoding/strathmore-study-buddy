@@ -234,6 +234,25 @@ def test_unchanged_assignment_not_counted(session, user_id):
     assert sync_course(session, adapter, "c1", user_id).assignments_updated == 1
 
 
+def test_unlisted_assignment_removed(session, user_id):
+    adapter = FakeAdapter()
+    adapter.assignments["c1"].append(AssignmentData("a2", "Assignment 2", "t1", None, None))
+    sync_course(session, adapter, "c1", user_id)
+    del adapter.assignments["c1"][0]  # a1 deleted upstream
+    stats = sync_course(session, adapter, "c1", user_id)
+    assert stats.assignments_removed == 1
+    assert [a.source_id for a in session.exec(select(Assignment))] == ["a2"]
+
+
+def test_empty_assignment_list_removes_nothing(session, user_id):
+    # an outage or blank reply looks like "no assignments": keep what we have
+    adapter = FakeAdapter()
+    sync_course(session, adapter, "c1", user_id)
+    adapter.assignments["c1"] = []
+    assert sync_course(session, adapter, "c1", user_id).assignments_removed == 0
+    assert len(session.exec(select(Assignment)).all()) == 1
+
+
 def _to_fingerprint(session, user_id, fetch_content):
     """Sync with a legacy content hash, then switch the file to a fingerprint."""
     adapter = FakeAdapter()
@@ -335,6 +354,27 @@ def test_moodle_adapter_fetches_contents_once_and_never_downloads(session, user_
     f = _resource(session, "10")
     assert f.content_hash.startswith("fp:") and f.mime_type == "application/pdf"
     assert _resource(session, "11").extracted_text == "page 11"
+
+
+def test_moodle_assignment_warnings_remove_nothing(session, user_id):
+    # Moodle reports trouble as `warnings` beside a 200: the list may be
+    # partial, so it can add and update but must not delete
+    from app.moodle import MoodleAdapter
+
+    client = FakeMoodleClient()
+    assignment = {"id": 1, "cmid": 10, "name": "Essay", "duedate": 0}
+    client.get_assignments = lambda courseid: {
+        "courses": [{"id": 5, "assignments": [assignment, {**assignment, "id": 2}]}]}
+    sync_all(session, MoodleAdapter(client), user_id)
+    client.get_assignments = lambda courseid: {
+        "courses": [{"id": 5, "assignments": [{**assignment, "name": "Essay v2"}]}],
+        "warnings": [{"item": "module", "warningcode": "1", "message": "No access rights"}]}
+    stats = sync_all(session, MoodleAdapter(client), user_id)["5"]
+    assert (stats.assignments_updated, stats.assignments_removed) == (1, 0)
+    assert sorted(a.title for a in session.exec(select(Assignment))) == ["Essay", "Essay v2"]
+    client.get_assignments = lambda courseid: {
+        "courses": [{"id": 5, "assignments": [{**assignment, "name": "Essay v2"}]}]}
+    assert sync_all(session, MoodleAdapter(client), user_id)["5"].assignments_removed == 1
 
 
 def test_resource_moved_between_topics_keeps_row_and_progress(session, user_id):

@@ -7,7 +7,8 @@ this module upserts them. Implements the plan's 6-step sync per course:
   meta changed  -> update title/url/type/mime in place, no reset
   topic changed -> move the row to the new topic, no reset
   unchanged     -> skip (hash check avoids re-running expensive LLM steps)
-Assignments are upserted separately and never become Resources.
+Assignments are upserted separately and never become Resources; ones the
+source stops listing are deleted (never off an empty or partial list).
 """
 
 from __future__ import annotations
@@ -81,6 +82,11 @@ class AssignmentData:
     description: str | None = None
 
 
+class PartialAssignments(list):
+    """An assignment list the source flagged as possibly incomplete (e.g.
+    Moodle warnings): sync upserts what it holds but deletes nothing off it."""
+
+
 class SourceAdapter(Protocol):
     source: str  # "moodle" | "classroom"
 
@@ -120,6 +126,7 @@ class SyncStats:
     resources_removed: int = 0
     assignments_new: int = 0
     assignments_updated: int = 0
+    assignments_removed: int = 0
     error: str | None = None  # set by sync_all when this course failed
 
     def as_dict(self) -> dict[str, Any]:
@@ -433,7 +440,8 @@ def sync_course(
                 stats.resources_removed += 1
     session.commit()
 
-    for a in adapter.fetch_assignments(course_source_id):
+    fetched = adapter.fetch_assignments(course_source_id)
+    for a in fetched:
         topic_id = topic_id_by_source.get(a.topic_source_id) if a.topic_source_id else None
         existing = session.exec(
             select(Assignment).where(
@@ -460,6 +468,16 @@ def sync_course(
             session.add(existing)
             session.commit()
             stats.assignments_updated += 1
+    # Deleted or hidden upstream: drop it. Only off a non-empty, complete
+    # list, so an outage or a partial reply can't wipe the course's deadlines.
+    if fetched and not isinstance(fetched, PartialAssignments):
+        listed = {a.source_id for a in fetched}
+        for gone in session.exec(select(Assignment).where(
+            Assignment.course_id == course.id, Assignment.source_id.not_in(listed)
+        )):
+            session.delete(gone)
+            stats.assignments_removed += 1
+        session.commit()
 
     return stats
 

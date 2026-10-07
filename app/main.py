@@ -417,11 +417,9 @@ def course_detail(
         .options(defer(Resource.extracted_text))  # the page lists titles only
     ):
         resources_by_topic[str(r.topic_id)].append(r)
-    assignments = session.exec(
-        select(Assignment)
-        .where(Assignment.course_id == course.id)
-        .order_by(Assignment.due_date)
-    ).all()
+    upcoming, past = split_assignments(session.exec(
+        select(Assignment).where(Assignment.course_id == course.id)
+    ).all(), settings.zone(user.timezone))
     return templates.TemplateResponse(
         request,
         "course.html",
@@ -429,11 +427,28 @@ def course_detail(
             "course": course,
             "topics": topics,
             "resources_by_topic": resources_by_topic,
-            "assignments": assignments,
+            "assignments": upcoming,
+            "past_assignments": past,
             "user": user,
             "active_page": "courses",
         },
     )
+
+
+def split_assignments(assignments, zone, now: datetime | None = None):
+    """(upcoming, past): upcoming are due from the start of today in `zone`,
+    nearest first, then undated ones; past are the rest, latest first."""
+    from app.srs import local_day_start
+
+    today = local_day_start(now or datetime.now(timezone.utc), zone)
+
+    def due(a):  # SQLite drops the zone
+        return a.due_date.replace(tzinfo=a.due_date.tzinfo or timezone.utc)
+
+    dated = [a for a in assignments if a.due_date is not None]
+    upcoming = sorted((a for a in dated if due(a) >= today), key=due)
+    past = sorted((a for a in dated if due(a) < today), key=due, reverse=True)
+    return upcoming + [a for a in assignments if a.due_date is None], past
 
 
 # The resource page shows only this much extracted text; Copy fetches the rest.

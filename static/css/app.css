@@ -347,6 +347,9 @@ small, .muted { color: var(--ink-soft); }
 .assignments ul { list-style: none; padding: 0; margin: 0; }
 .assignments li { padding: 0.15rem 0; }
 .assignments .when { color: var(--ink-soft); font-size: 0.9rem; }
+.assignments p.when { margin: 0; }
+.assignments .past { margin-top: 0.5rem; }
+.assignments .past summary { cursor: pointer; color: var(--ink-soft); font-size: 0.9rem; }
 
 /* Empty states */
 

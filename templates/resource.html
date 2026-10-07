@@ -14,7 +14,9 @@
     {{ resource.type }}{% if resource.mime_type %} · {{ resource.mime_type }}{% endif %} · <span class="tag {{ resource.status }}">{{ resource.status }}</span>
     {% if original_url %}<br><a href="{{ original_url }}" target="_blank" rel="noopener">Open the original</a>{% endif %}
   </p>
-  {% if resource.error %}
+  {% if resource.error is cap_note %}
+  <p class="muted">{{ resource.error }}</p>
+  {% elif resource.error %}
   <p class="resource-error">{{ resource.error }}</p>
   {% endif %}
 </header>

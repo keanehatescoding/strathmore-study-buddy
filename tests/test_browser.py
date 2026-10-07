@@ -1,5 +1,7 @@
 """Phase 1.5 tests: course browser renders synced data (SQLite + TestClient)."""
 
+import uuid
+
 from app.models import Course, Resource, Topic
 
 
@@ -214,3 +216,15 @@ def test_other_original_links_unchanged(testapp):
     url = "https://drive.google.com/file/d/abc/view"
     rid = _resource_with_url(testapp, "classroom", "file", url)
     assert f'href="{url}"' in testapp["client"].get(f"/resources/{rid}").text
+
+
+def test_cap_note_is_shown_as_a_note_not_an_error(testapp):
+    from app.extract import cap_text
+
+    _, note = cap_text("x\n" * 400_000)
+    rid = _resource_with_text(testapp, "kept part")
+    with testapp["Session"]() as s:
+        s.get(Resource, uuid.UUID(rid)).error = note
+        s.commit()
+    page = testapp["client"].get(f"/resources/{rid}").text
+    assert f'<p class="muted">{note}</p>' in page and "resource-error" not in page

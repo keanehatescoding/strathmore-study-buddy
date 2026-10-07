@@ -4,6 +4,8 @@
   before chunking, since chunk quality degrades on very long inputs. Text
   without blank lines (transcripts) falls back to lines, then spaces. A
   section whose reply is truncated is halved and retried.
+- At most MAX_SECTIONS sections are sent, a backstop behind the extraction
+  cap (app.extract.MAX_EXTRACTED_CHARS) for text extracted before it.
 - Short texts skip the LLM entirely (single chunk, no cost).
 - Cache: resources that already have chunks and status "extracted" are
   skipped; status "pending" with stale chunks means content changed ->
@@ -17,11 +19,14 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
+from app.extract import CAPPED_PREFIX, is_cap_note
 from app.llm import LLMClient, TruncatedError
 from app.llm_schemas import ChunkReply
 from app.models import Chunk
 
 MAX_SECTION_CHARS = 10000
+# presplit packs paragraphs greedily, so capped text stays well under this
+MAX_SECTIONS = 100
 MIN_LLM_CHARS = 300
 MIN_SPLIT_CHARS = 1000  # a truncated reply on a shorter section is an error
 
@@ -143,11 +148,17 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
         return 0  # leave as-is for a run that has an LLM
 
     text = resource.extracted_text or ""
+    note = resource.error if is_cap_note(resource.error) else None
     seen_hash = resource.content_hash  # loaded with the text: what it is of
     if not text.strip():
         items = []
     elif needs_llm(resource):
-        items = chunk_sections(presplit(text), llm)  # paid work: before any delete
+        sections = presplit(text)
+        if len(sections) > MAX_SECTIONS:
+            note = (f"{CAPPED_PREFIX}{MAX_SECTIONS} of {len(sections)} sections "
+                    "are studied: the rest is past the size cap")
+            sections = sections[:MAX_SECTIONS]
+        items = chunk_sections(sections, llm)  # paid work: before any delete
         if not items:
             raise ChunkingError("chunker produced no chunks")
     else:
@@ -166,7 +177,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
             )
         )
     resource.status = "extracted" if items else "skipped"
-    resource.error = None if items else "no text to chunk"
+    resource.error = note if items else "no text to chunk"
     session.add(resource)
     # old chunks out, new ones in: one transaction, kept only if still current
     if not commit_if_current(session, resource.id, seen_hash):

@@ -32,7 +32,7 @@ from app.chunk import chunk_resource, needs_llm
 from app.config import settings
 from app.db import engine
 from app.drive import DriveError
-from app.extract import ExtractError, SkipResource, extract_resource_text
+from app.extract import ExtractError, SkipResource, cap_text, extract_resource_text
 from app.llm import QuotaExhaustedError
 from app.models import Chunk, Course, QuizAttempt, QuizFailure, Resource, Topic, User
 from app.moodle import ForeignURLError, MoodleError
@@ -237,11 +237,11 @@ def run_extraction(session: Session, downloader, course_id=None,
             print(f"  extract {i}/{len(ids)} shared: {r.title[:60]}", flush=True)
             continue
         try:
-            r.extracted_text = extract_resource_text(r, dl)
+            r.extracted_text, note = cap_text(extract_resource_text(r, dl))
             _succeeded(r)
             if r.extracted_text and r.extracted_text.strip():
                 r.status = "extracted"
-                r.error = None
+                r.error = note
                 outcome = "extracted"
             else:  # nothing to chunk or quiz on; don't bill a chunker call
                 r.status = "skipped"

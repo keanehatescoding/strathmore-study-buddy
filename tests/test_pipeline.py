@@ -940,3 +940,57 @@ def test_quiz_failure_on_a_chunk_deleted_meanwhile_is_not_fatal(monkeypatch):
         monkeypatch.setattr(Session, "get", get)
         assert _quiz_failed(s, cid, 1, RuntimeError("bad reply")) == 0
         assert s.exec(select(QuizFailure)).all() == []
+
+
+class CountingLLM(FakeLLM):
+    def __init__(self):
+        self.sent = 0
+
+    def complete_json(self, system, user, **kw):
+        self.sent += len(user)
+        return super().complete_json(system, user, **kw)
+
+
+def test_oversized_text_is_capped_with_a_note(session):
+    from app.extract import MAX_EXTRACTED_CHARS, is_cap_note
+
+    line = "A line of a very long book.\n"
+    big = line * (MAX_EXTRACTED_CHARS // len(line) * 3)
+    _resource(session, raw_url="https://m.example/big.txt")
+    counts = run_extraction(session, lambda url: (big.encode(), "text/plain")).counts
+    assert counts["extracted"] == 1
+    r = session.exec(select(Resource)).one()
+    assert len(r.extracted_text) <= MAX_EXTRACTED_CHARS
+    assert r.extracted_text.endswith("book.")  # cut on a line break
+    assert is_cap_note(r.error) and f"{len(big):,}" in r.error
+
+    llm = CountingLLM()
+    assert chunk_resource(session, r, llm) > 0
+    assert llm.sent < MAX_EXTRACTED_CHARS * 1.1  # never the whole file
+    assert is_cap_note(r.error)  # chunking keeps the note
+
+
+def test_normal_text_is_not_capped(session):
+    _resource(session, raw_url="https://m.example/ok.txt")
+    run_extraction(session, lambda url: (b"short notes", "text/plain"))
+    r = session.exec(select(Resource)).one()
+    assert (r.extracted_text, r.error) == ("short notes", None)
+
+
+def test_chunking_sends_at_most_max_sections(session):
+    from app.chunk import MAX_SECTION_CHARS, MAX_SECTIONS
+    from app.extract import is_cap_note
+
+    para = "p" * (MAX_SECTION_CHARS - 10) + "\n\n"
+    # extracted before the cap existed: the section cap is the backstop
+    r = _resource(session, status="extracted", extracted_text=para * (MAX_SECTIONS + 20))
+    calls = []
+
+    class Llm(FakeLLM):
+        def complete_json(self, system, user, **kw):
+            calls.append(user)
+            return super().complete_json(system, user, **kw)
+
+    assert chunk_resource(session, r, Llm()) == 2 * MAX_SECTIONS
+    assert len(calls) == MAX_SECTIONS
+    assert is_cap_note(r.error) and f"of {MAX_SECTIONS + 20} sections" in r.error

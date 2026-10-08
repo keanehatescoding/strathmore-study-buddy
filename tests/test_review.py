@@ -594,7 +594,12 @@ def test_nav_badge_failure_still_renders_the_page(testapp, monkeypatch):
     def broken(*a, **k):
         raise RuntimeError("database down")
 
+    _seed_overdue(testapp, 2)
     monkeypatch.setattr("app.main.due_count", broken)
     r = testapp["client"].get("/stats")
     assert r.status_code == 200
     assert "test@x.edu" in r.text and "nav-count" not in r.text
+    assert "<dt>Due now</dt>\n    <dd>—</dd>" in r.text  # unknown, not 0
+    r = testapp["client"].get("/review")
+    assert r.status_code == 200 and "nav-count" not in r.text
+    assert "<strong>2</strong> questions due" in r.text  # falls back to the queue

@@ -230,7 +230,8 @@ def test_cap_note_is_shown_as_a_note_not_an_error(testapp):
     assert f'<p class="muted">{note}</p>' in page and "resource-error" not in page
 
 
-def _resource_with_status(testapp, status: str, error: str | None = None) -> str:
+def _resource_with_status(testapp, status: str, error: str | None = None,
+                          type: str = "file") -> str:
     with testapp["Session"]() as s:
         course = Course(user_id=testapp["user_id"], source="moodle", source_id="cs",
                         name="Status")
@@ -239,7 +240,7 @@ def _resource_with_status(testapp, status: str, error: str | None = None) -> str
         topic = Topic(course_id=course.id, source_id="ts", title="T", order=0)
         s.add(topic)
         s.commit()
-        res = Resource(topic_id=topic.id, source="moodle", source_id="rs", type="file",
+        res = Resource(topic_id=topic.id, source="moodle", source_id="rs", type=type,
                        title="file.pdf", status=status, error=error)
         s.add(res)
         s.commit()
@@ -258,6 +259,13 @@ def test_skipped_resource_gives_its_reason(testapp):
     assert "This file was skipped, so there's no text to show: file is over 50 MB." in page
     assert "yet" not in page.split("Extracted text")[1]
     assert page.count("file is over 50 MB") == 1  # not repeated in the header
+
+
+def test_skipped_link_is_not_called_a_file(testapp):
+    rid = _resource_with_status(testapp, "skipped", "site blocked", type="link")
+    page = testapp["client"].get(f"/resources/{rid}").text
+    assert "This link was skipped, so there's no text to show: site blocked." in page
+    assert "This file" not in page
 
 
 def test_failed_resource_says_it_failed(testapp):

@@ -22,7 +22,7 @@
   </div>
   <div class="figure">
     <dt>Due now</dt>
-    <dd>{{ due_count or 0 }}</dd>
+    <dd>{{ due_count if due_count is defined else "—" }}</dd>
   </div>
   <div class="figure">
     <dt>Answered</dt>

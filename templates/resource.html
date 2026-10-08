@@ -55,14 +55,15 @@
   {% endif %}
   <pre class="text" id="extracted-text-content">{{ resource.extracted_text[:preview_chars] }}</pre>
   {% else %}
+  {% set noun = {"link": "link", "page_text": "page", "video": "video"}.get(resource.type, "file") %}
   {% if resource.status == "pending" %}
-  <p class="row-empty">No text yet. It shows up here once the file has been read.</p>
+  <p class="row-empty">No text yet. It shows up here once the {{ noun }} has been read.</p>
   {% elif resource.status == "skipped" %}
-  <p class="row-empty">This file was skipped, so there's no text to show{% if resource.error %}: {{ resource.error }}{% endif %}.</p>
+  <p class="row-empty">This {{ noun }} was skipped, so there's no text to show{% if resource.error %}: {{ resource.error }}{% endif %}.</p>
   {% elif resource.status == "failed" %}
-  <p class="row-empty">We couldn't read the text from this file, so there's nothing to show.</p>
+  <p class="row-empty">We couldn't read the text from this {{ noun }}, so there's nothing to show.</p>
   {% else %}
-  <p class="row-empty">This file has no text to show.</p>
+  <p class="row-empty">This {{ noun }} has no text to show.</p>
   {% endif %}
   {% endif %}
 </section>

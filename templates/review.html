@@ -3,16 +3,18 @@
 
 {% block body %}
 {% if items %}
+{# due_count is missing when the nav lookup fails; the queue is still a lower bound #}
+{% set due = due_count if due_count is defined else items|length %}
 <div class="due-strip">
-  <p><strong>{{ due_count }}</strong> question{% if due_count != 1 %}s{% endif %} due</p>
+  <p><strong>{{ due }}</strong> question{% if due != 1 %}s{% endif %} due</p>
   <a href="/review/take" class="btn btn-primary">Start review</a>
 </div>
 
 <div class="section-head">
   <h1 class="flush">Review queue</h1>
 </div>
-{% if due_count > items|length %}
-<p class="section-note">Showing the next {{ items|length }} of {{ due_count }}. The rest come up as you work through these.</p>
+{% if due > items|length %}
+<p class="section-note">Showing the next {{ items|length }} of {{ due }}. The rest come up as you work through these.</p>
 {% endif %}
 <ul class="rows queue">
   {% for i in items %}

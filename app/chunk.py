@@ -31,6 +31,8 @@ MAX_SECTION_CHARS = 10000
 MAX_SECTIONS = 100
 MIN_LLM_CHARS = 300
 MIN_SPLIT_CHARS = 1000  # a truncated reply on a shorter section is an error
+SECTIONS_CAPPED = "sections are studied: the rest is past the size cap"
+SECTIONS_JOIN = ". Of those, "  # character cap note + section cap note
 
 
 class ChunkingError(RuntimeError):
@@ -134,6 +136,15 @@ def chunk_sections(sections: list[str], llm: LLMClient,
     return out, 0
 
 
+def text_cap_note(error: str | None) -> str | None:
+    """The extraction (character) cap note in error, minus any section cap
+    note a previous chunking added, so re-chunking never stacks them."""
+    if not is_cap_note(error):
+        return None
+    note = error.split(SECTIONS_JOIN)[0]
+    return None if note.endswith(SECTIONS_CAPPED) else note
+
+
 def needs_llm(resource) -> bool:
     return len(resource.extracted_text or "") >= MIN_LLM_CHARS
 
@@ -159,7 +170,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
         return 0  # leave as-is for a run that has an LLM
 
     text = resource.extracted_text or ""
-    note = resource.error if is_cap_note(resource.error) else None
+    note = text_cap_note(resource.error)
     seen_hash = resource.content_hash  # loaded with the text: what it is of
     if not text.strip():
         items = []
@@ -167,8 +178,10 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
         sections = presplit(text)
         items, left = chunk_sections(sections, llm)  # paid work: before any delete
         if left:
-            note = (f"{CAPPED_PREFIX}{len(sections) - left} of {len(sections)} "
-                    "sections are studied: the rest is past the size cap")
+            capped = f"{len(sections) - left} of {len(sections)} {SECTIONS_CAPPED}"
+            # keep both: the text was cut, then only part of what's left chunked
+            note = (f"{note}{SECTIONS_JOIN}{capped}" if note
+                    else f"{CAPPED_PREFIX}{capped}")
         if not items:
             raise ChunkingError("chunker produced no chunks")
     else:

@@ -1005,3 +1005,22 @@ def test_chunking_sends_at_most_max_sections(session):
     assert chunk_resource(session, r, Llm()) == 2 * MAX_SECTIONS
     assert len(calls) == MAX_SECTIONS
     assert is_cap_note(r.error) and f"of {MAX_SECTIONS + 20} sections" in r.error
+
+
+def test_section_cap_keeps_the_character_cap_note(session):
+    from app.chunk import MAX_SECTION_CHARS, MAX_SECTIONS
+    from app.extract import cap_text, is_cap_note
+
+    para = "p" * (MAX_SECTION_CHARS - 10) + "\n\n"
+    _, char_note = cap_text("x" * 10_000_000)
+    r = _resource(session, status="downloaded", error=char_note,
+                  extracted_text=para * (MAX_SECTIONS + 20))
+    assert chunk_resource(session, r, FakeLLM()) > 0
+    assert is_cap_note(r.error) and r.error.startswith(char_note)
+    assert f"of {MAX_SECTIONS + 20} sections" in r.error
+
+    # chunking again carries the character note but never stacks section notes
+    first = r.error
+    r.status = "failed"
+    assert chunk_resource(session, r, FakeLLM()) > 0
+    assert r.error == first

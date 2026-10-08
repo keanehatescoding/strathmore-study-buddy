@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
+from app.extract import cap_text, is_cap_note
 from app.models import Chunk, QuizAttempt, QuizItem, Resource
 
 
@@ -49,15 +50,16 @@ def copy_extraction(session: Session, r: Resource, downloader=None) -> bool:
             return False
     # streamed text only: a blank donor must not end the search, and every
     # matching copy carries a whole document
-    texts = session.exec(_same_material(r, Resource.extracted_text).where(
+    texts = session.exec(_same_material(r, Resource.extracted_text, Resource.error).where(
         Resource.status == "extracted", Resource.extracted_text.is_not(None),
     ).execution_options(yield_per=1))
     with texts:  # closes the server-side cursor when a donor is found early
-        for text in texts:
+        for text, error in texts:
             if text.strip():
-                r.extracted_text = text
+                # a donor extracted before the cap may be over it
+                r.extracted_text, note = cap_text(text)
                 r.status = "extracted"
-                r.error = None
+                r.error = note or (error if is_cap_note(error) else None)
                 return True
     return False
 
@@ -93,7 +95,8 @@ def copy_chunks(session: Session, r: Resource) -> int:
                           order=c.order, start_char=c.start_char, end_char=c.end_char))
     seen_hash = r.content_hash
     r.status = "extracted"
-    r.error = None
+    if not is_cap_note(r.error):
+        r.error = None
     session.add(r)
     if not commit_if_current(session, r.id, seen_hash):
         raise ContentChanged(r.id)

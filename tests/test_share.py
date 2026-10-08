@@ -309,3 +309,29 @@ def test_a_failed_chunk_share_falls_back_to_chunking(session, monkeypatch):
 
     assert res.counts["share_errors"] == 1 and llm.calls == 1
     assert len(_chunks(session, r)) == 2
+
+
+def test_a_shared_copy_keeps_the_donors_cap_note(session):
+    note = "Only the first 10 of 20 characters are studied: the rest is past the size cap"
+    _copy_of(session, "a@x", status="extracted", extracted_text=TEXT, error=note)
+    course, r = _copy_of(session, "b@x")
+
+    run_extraction(session, no_download, course.id)
+
+    session.refresh(r)
+    assert (r.status, r.error) == ("extracted", note)
+
+
+def test_a_shared_copy_of_an_uncapped_donor_is_capped(session):
+    from app.extract import MAX_EXTRACTED_CHARS, is_cap_note
+
+    big = "A line of a very long book.\n" * (MAX_EXTRACTED_CHARS // 10)
+    # extracted before the cap existed
+    _copy_of(session, "a@x", status="extracted", extracted_text=big)
+    course, r = _copy_of(session, "b@x")
+
+    run_extraction(session, no_download, course.id)
+
+    session.refresh(r)
+    assert len(r.extracted_text) <= MAX_EXTRACTED_CHARS
+    assert is_cap_note(r.error) and f"{len(big):,}" in r.error

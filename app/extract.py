@@ -25,6 +25,10 @@ MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 # DOCX/PPTX are zips: refuse ones that would inflate past this in memory.
 MAX_UNZIPPED_BYTES = 200 * 1024 * 1024
 MAX_ZIP_MEMBERS = 10_000
+# Text past this is dropped (about a 250-page book): every 10k characters is
+# a chunker call, and each chunk's quiz is billed again on top.
+MAX_EXTRACTED_CHARS = 500_000
+CAPPED_PREFIX = "Only the first "  # every cap note starts with this
 
 
 class ExtractError(RuntimeError):
@@ -37,6 +41,23 @@ class SkipResource(RuntimeError):
 
 def too_large_message(what: str = "file") -> str:
     return f"{what} is over {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB"
+
+
+def cap_text(text: str) -> tuple[str, str | None]:
+    """Truncate text over MAX_EXTRACTED_CHARS, on a line break when one is
+    close to the cap; returns (text, note), the note None when untouched."""
+    if len(text) <= MAX_EXTRACTED_CHARS:
+        return text, None
+    cut = text.rfind("\n", 0, MAX_EXTRACTED_CHARS)
+    if cut < MAX_EXTRACTED_CHARS * 9 // 10:
+        cut = MAX_EXTRACTED_CHARS
+    return text[:cut], (f"{CAPPED_PREFIX}{cut:,} of {len(text):,} characters "
+                        "are studied: the rest is past the size cap")
+
+
+def is_cap_note(error: str | None) -> bool:
+    """A cap note is not a failure: chunking and sharing keep it."""
+    return bool(error) and error.startswith(CAPPED_PREFIX)
 
 
 def _check_zip(blob: bytes, kind: str) -> None:

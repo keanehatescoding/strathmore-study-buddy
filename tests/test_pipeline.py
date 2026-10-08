@@ -454,9 +454,20 @@ def test_truncated_section_is_halved_and_retried():
     from app.chunk import chunk_sections
 
     llm = TruncatingLLM(1500)
-    out = chunk_sections(["para\n\n" * 500], llm)  # 3000 chars
-    assert out and llm.sizes[0] == 3000
+    out, left = chunk_sections(["para\n\n" * 500], llm)  # 3000 chars
+    assert out and not left and llm.sizes[0] == 3000
     assert all(s <= 1500 for s in llm.sizes[1:])
+
+
+def test_retried_halves_count_against_the_call_budget():
+    from app.chunk import chunk_sections
+
+    llm = TruncatingLLM(1500)
+    # every section truncates once, so each costs three calls
+    out, left = chunk_sections(["para\n\n" * 500] * 4, llm, max_calls=5)
+    assert len(llm.sizes) == 5
+    assert left == 3  # the second section is only half studied
+    assert out
 
 
 def test_truncation_on_a_small_section_raises():
@@ -480,8 +491,8 @@ def test_malformed_chunks_are_dropped_not_crashed_on():
     from app.chunk import chunk_sections
 
     good = {"title": "T", "content": "real text"}
-    assert chunk_sections(["s"], MessyLLM("oops")) == []
-    out = chunk_sections(["s"], MessyLLM([
+    assert chunk_sections(["s"], MessyLLM("oops")) == ([], 0)
+    out, _ = chunk_sections(["s"], MessyLLM([
         "a string", None, {"title": "no content"}, {"content": None},
         {"content": ["list"]}, {"title": None, "content": "untitled ok"}, good,
     ]))
@@ -940,3 +951,91 @@ def test_quiz_failure_on_a_chunk_deleted_meanwhile_is_not_fatal(monkeypatch):
         monkeypatch.setattr(Session, "get", get)
         assert _quiz_failed(s, cid, 1, RuntimeError("bad reply")) == 0
         assert s.exec(select(QuizFailure)).all() == []
+
+
+class CountingLLM(FakeLLM):
+    def __init__(self):
+        self.sent = 0
+
+    def complete_json(self, system, user, **kw):
+        self.sent += len(user)
+        return super().complete_json(system, user, **kw)
+
+
+def test_oversized_text_is_capped_with_a_note(session):
+    from app.extract import MAX_EXTRACTED_CHARS, is_cap_note
+
+    line = "A line of a very long book.\n"
+    big = line * (MAX_EXTRACTED_CHARS // len(line) * 3)
+    _resource(session, raw_url="https://m.example/big.txt")
+    counts = run_extraction(session, lambda url: (big.encode(), "text/plain")).counts
+    assert counts["extracted"] == 1
+    r = session.exec(select(Resource)).one()
+    assert len(r.extracted_text) <= MAX_EXTRACTED_CHARS
+    assert r.extracted_text.endswith("book.")  # cut on a line break
+    assert is_cap_note(r.error) and f"{len(big):,}" in r.error
+
+    llm = CountingLLM()
+    assert chunk_resource(session, r, llm) > 0
+    assert llm.sent < MAX_EXTRACTED_CHARS * 1.1  # never the whole file
+    assert is_cap_note(r.error)  # chunking keeps the note
+
+
+def test_normal_text_is_not_capped(session):
+    _resource(session, raw_url="https://m.example/ok.txt")
+    run_extraction(session, lambda url: (b"short notes", "text/plain"))
+    r = session.exec(select(Resource)).one()
+    assert (r.extracted_text, r.error) == ("short notes", None)
+
+
+def test_chunking_sends_at_most_max_sections(session):
+    from app.chunk import MAX_SECTION_CHARS, MAX_SECTIONS
+    from app.extract import is_cap_note
+
+    para = "p" * (MAX_SECTION_CHARS - 10) + "\n\n"
+    # extracted before the cap existed: the section cap is the backstop
+    r = _resource(session, status="extracted", extracted_text=para * (MAX_SECTIONS + 20))
+    calls = []
+
+    class Llm(FakeLLM):
+        def complete_json(self, system, user, **kw):
+            calls.append(user)
+            return super().complete_json(system, user, **kw)
+
+    assert chunk_resource(session, r, Llm()) == 2 * MAX_SECTIONS
+    assert len(calls) == MAX_SECTIONS
+    assert is_cap_note(r.error) and f"of {MAX_SECTIONS + 20} sections" in r.error
+
+
+def test_section_cap_keeps_the_character_cap_note(session):
+    from app.chunk import MAX_SECTION_CHARS, MAX_SECTIONS
+    from app.extract import cap_text, is_cap_note
+
+    para = "p" * (MAX_SECTION_CHARS - 10) + "\n\n"
+    _, char_note = cap_text("x" * 10_000_000)
+    r = _resource(session, status="downloaded", error=char_note,
+                  extracted_text=para * (MAX_SECTIONS + 20))
+    assert chunk_resource(session, r, FakeLLM()) > 0
+    assert is_cap_note(r.error) and r.error.startswith(char_note)
+    assert f"of {MAX_SECTIONS + 20} sections" in r.error
+
+    # chunking again carries the character note but never stacks section notes
+    first = r.error
+    r.status = "failed"
+    assert chunk_resource(session, r, FakeLLM()) > 0
+    assert r.error == first
+
+
+def test_a_chunking_retry_keeps_the_character_cap_note(session):
+    from app.extract import cap_text
+
+    _, char_note = cap_text("x" * 10_000_000)
+    r = _resource(session, status="extracted", error=char_note, extracted_text="x" * 500)
+    run_chunking(session, FailingLLM())
+    session.refresh(r)
+    assert r.error.startswith(char_note) and "provider exploded" in r.error
+
+    _age(session, r)
+    assert run_chunking(session, FakeLLM()).counts["chunks"] == 2
+    session.refresh(r)
+    assert r.error == char_note

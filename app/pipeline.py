@@ -28,11 +28,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, func, or_, select
 
-from app.chunk import chunk_resource, needs_llm
+from app.chunk import FAILED_JOIN, chunk_resource, needs_llm, text_cap_note
 from app.config import settings
 from app.db import engine
 from app.drive import DriveError
-from app.extract import ExtractError, SkipResource, extract_resource_text
+from app.extract import ExtractError, SkipResource, cap_text, extract_resource_text
 from app.llm import QuotaExhaustedError
 from app.models import Chunk, Course, QuizAttempt, QuizFailure, Resource, Topic, User
 from app.moodle import ForeignURLError, MoodleError
@@ -237,11 +237,11 @@ def run_extraction(session: Session, downloader, course_id=None,
             print(f"  extract {i}/{len(ids)} shared: {r.title[:60]}", flush=True)
             continue
         try:
-            r.extracted_text = extract_resource_text(r, dl)
+            r.extracted_text, note = cap_text(extract_resource_text(r, dl))
             _succeeded(r)
             if r.extracted_text and r.extracted_text.strip():
                 r.status = "extracted"
-                r.error = None
+                r.error = note
                 outcome = "extracted"
             else:  # nothing to chunk or quiz on; don't bill a chunker call
                 r.status = "skipped"
@@ -340,7 +340,10 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r is None or r.content_hash != seen_hash:
                 counts["changed"] += 1  # failure was on content since replaced
                 continue
-            _defer(r, f"{type(e).__name__}: {e}")
+            # keep the cap note: the retry chunks the same truncated text
+            note = text_cap_note(r.error)
+            failure = f"{type(e).__name__}: {e}"
+            _defer(r, f"{note}{FAILED_JOIN}{failure}" if note else failure)
             if r.attempts >= MAX_CHUNK_ATTEMPTS:
                 r.status = "failed"  # existing chunks, if any, are kept
             session.add(r)

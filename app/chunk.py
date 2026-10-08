@@ -4,6 +4,9 @@
   before chunking, since chunk quality degrades on very long inputs. Text
   without blank lines (transcripts) falls back to lines, then spaces. A
   section whose reply is truncated is halved and retried.
+- At most MAX_SECTIONS calls are made per resource, retried halves included:
+  a backstop behind the extraction cap (app.extract.MAX_EXTRACTED_CHARS) for
+  text extracted before it, and for replies that keep truncating.
 - Short texts skip the LLM entirely (single chunk, no cost).
 - Cache: resources that already have chunks and status "extracted" are
   skipped; status "pending" with stale chunks means content changed ->
@@ -17,13 +20,20 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
+from app.extract import CAPPED_PREFIX, is_cap_note
 from app.llm import LLMClient, TruncatedError
 from app.llm_schemas import ChunkReply
 from app.models import Chunk
 
 MAX_SECTION_CHARS = 10000
+# LLM calls per resource; presplit packs paragraphs greedily, so capped text
+# stays well under this
+MAX_SECTIONS = 100
 MIN_LLM_CHARS = 300
 MIN_SPLIT_CHARS = 1000  # a truncated reply on a shorter section is an error
+SECTIONS_CAPPED = "sections are studied: the rest is past the size cap"
+SECTIONS_JOIN = ". Of those, "  # character cap note + section cap note
+FAILED_JOIN = ". Chunking failed: "  # character cap note + retryable error
 
 
 class ChunkingError(RuntimeError):
@@ -98,9 +108,17 @@ def locate(content: str, full: str) -> tuple[int | None, int | None]:
     return start_orig, end_orig
 
 
-def chunk_sections(sections: list[str], llm: LLMClient) -> list[dict]:
-    out = []
-    for i, section in enumerate(sections):
+def chunk_sections(sections: list[str], llm: LLMClient,
+                   max_calls: int = MAX_SECTIONS) -> tuple[list[dict], int]:
+    """Chunk sections in order with at most max_calls LLM calls, halves of a
+    truncated section included. Returns (chunks, sections left unstudied)."""
+    out, calls = [], 0
+    todo = [(i, s) for i, s in reversed(list(enumerate(sections)))]  # a stack
+    while todo:
+        if calls >= max_calls:
+            return out, len({i for i, _ in todo})
+        i, section = todo.pop()
+        calls += 1
         try:
             data = llm.complete_json(
                 SYSTEM,
@@ -112,10 +130,20 @@ def chunk_sections(sections: list[str], llm: LLMClient) -> list[dict]:
             if len(section) < MIN_SPLIT_CHARS:
                 raise
             # the reply outgrew the output limit: two halves fit
-            out.extend(chunk_sections(presplit(section, len(section) // 2 + 1), llm))
+            halves = presplit(section, len(section) // 2 + 1)
+            todo.extend((i, h) for h in reversed(halves))
             continue
         out.extend(c.model_dump() for c in ChunkReply.model_validate(data).chunks)
-    return out
+    return out, 0
+
+
+def text_cap_note(error: str | None) -> str | None:
+    """The extraction (character) cap note in error, minus any section cap
+    note or chunking error added since, so re-chunking never stacks them."""
+    if not is_cap_note(error):
+        return None
+    note = error.split(FAILED_JOIN)[0].split(SECTIONS_JOIN)[0]
+    return None if note.endswith(SECTIONS_CAPPED) else note
 
 
 def needs_llm(resource) -> bool:
@@ -143,11 +171,18 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
         return 0  # leave as-is for a run that has an LLM
 
     text = resource.extracted_text or ""
+    note = text_cap_note(resource.error)
     seen_hash = resource.content_hash  # loaded with the text: what it is of
     if not text.strip():
         items = []
     elif needs_llm(resource):
-        items = chunk_sections(presplit(text), llm)  # paid work: before any delete
+        sections = presplit(text)
+        items, left = chunk_sections(sections, llm)  # paid work: before any delete
+        if left:
+            capped = f"{len(sections) - left} of {len(sections)} {SECTIONS_CAPPED}"
+            # keep both: the text was cut, then only part of what's left chunked
+            note = (f"{note}{SECTIONS_JOIN}{capped}" if note
+                    else f"{CAPPED_PREFIX}{capped}")
         if not items:
             raise ChunkingError("chunker produced no chunks")
     else:
@@ -166,7 +201,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
             )
         )
     resource.status = "extracted" if items else "skipped"
-    resource.error = None if items else "no text to chunk"
+    resource.error = note if items else "no text to chunk"
     session.add(resource)
     # old chunks out, new ones in: one transaction, kept only if still current
     if not commit_if_current(session, resource.id, seen_hash):

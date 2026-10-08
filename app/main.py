@@ -26,6 +26,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app import auth as auth_mod
 from app.config import running_commit, settings
 from app.db import get_session
+from app.extract import is_cap_note
 from app.grade import (
     MAX_ANSWER_CHARS,
     InvalidAnswer,
@@ -185,6 +186,7 @@ def local_time(value: datetime, user: User) -> str:
 
 
 templates.env.filters["local_time"] = local_time
+templates.env.tests["cap_note"] = is_cap_note
 
 
 async def checked_form(request: Request):

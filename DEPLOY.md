@@ -76,6 +76,10 @@
    A run that exhausts the LLM quota stops early (`quota_exhausted`) and the
    next day's run resumes; resources that keep failing back off and are
    eventually marked failed instead of being re-billed daily.
+   One resource's cost is bounded too: extracted text is truncated to its
+   first 500,000 characters (`MAX_EXTRACTED_CHARS`, about a 250-page book),
+   and the chunker sends at most 100 sections (`MAX_SECTIONS`). A truncated
+   resource is still studied; its page says how much of it was kept.
 
    Both crons need the web service's variables (`scripts/railway-sync-cron-env.sh
    <service>` references them, `LLM_*` included); set `LLM_CHUNK_MODEL` /

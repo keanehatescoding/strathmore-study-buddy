@@ -1039,3 +1039,11 @@ def test_a_chunking_retry_keeps_the_character_cap_note(session):
     assert run_chunking(session, FakeLLM()).counts["chunks"] == 2
     session.refresh(r)
     assert r.error == char_note
+
+
+def test_skip_reason_is_kept(session):
+    r = _resource(session, source_id="skip", type="link", raw_url="https://example.com")
+    run_extraction(session, downloader=None)
+    session.refresh(r)
+    assert r.status == "skipped"
+    assert r.error == "web links aren't read, only files, pages and videos"

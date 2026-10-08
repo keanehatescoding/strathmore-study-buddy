@@ -4,13 +4,16 @@
 {% block body %}
 {% if items %}
 <div class="due-strip">
-  <p><strong>{{ items|length }}</strong> question{% if items|length != 1 %}s{% endif %} due</p>
+  <p><strong>{{ due_count }}</strong> question{% if due_count != 1 %}s{% endif %} due</p>
   <a href="/review/take" class="btn btn-primary">Start review</a>
 </div>
 
 <div class="section-head">
   <h1 class="flush">Review queue</h1>
 </div>
+{% if due_count > items|length %}
+<p class="section-note">Showing the next {{ items|length }} of {{ due_count }}. The rest come up as you work through these.</p>
+{% endif %}
 <ul class="rows queue">
   {% for i in items %}
   <li>

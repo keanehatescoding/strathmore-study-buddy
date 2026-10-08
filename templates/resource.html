@@ -16,7 +16,7 @@
   </p>
   {% if resource.error is cap_note and resource.status != "failed" %}
   <p class="muted">{{ resource.error }}</p>
-  {% elif resource.error %}
+  {% elif resource.error and resource.status != "skipped" %}
   <p class="resource-error">{{ resource.error }}</p>
   {% endif %}
 </header>
@@ -55,7 +55,15 @@
   {% endif %}
   <pre class="text" id="extracted-text-content">{{ resource.extracted_text[:preview_chars] }}</pre>
   {% else %}
-  <p class="row-empty">No extracted text yet — extraction runs in Phase 2.</p>
+  {% if resource.status == "pending" %}
+  <p class="row-empty">No text yet. It shows up here once the file has been read.</p>
+  {% elif resource.status == "skipped" %}
+  <p class="row-empty">This file was skipped, so there's no text to show{% if resource.error %}: {{ resource.error }}{% endif %}.</p>
+  {% elif resource.status == "failed" %}
+  <p class="row-empty">We couldn't read the text from this file, so there's nothing to show.</p>
+  {% else %}
+  <p class="row-empty">This file has no text to show.</p>
+  {% endif %}
   {% endif %}
 </section>
 

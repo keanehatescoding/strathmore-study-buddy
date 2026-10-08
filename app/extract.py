@@ -303,7 +303,7 @@ def extract_resource_text(resource, downloader: Downloader | None = None) -> str
             raise SkipResource("video has no URL")
         return extract_transcript(resource.raw_url)
     if resource.type == "link":
-        raise SkipResource("generic links are not extracted in v1")
+        raise SkipResource("web links aren't read, only files, pages and videos")
     if resource.type == "file":
         if downloader is None:
             raise ExtractError("no downloader available for file resource")

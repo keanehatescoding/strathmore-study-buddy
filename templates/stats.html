@@ -2,9 +2,9 @@
 {% block title %}Stats — Strathmore Study Buddy{% endblock %}
 
 {% block body %}
-{% if due > 0 %}
+{% if due_count and due_count > 0 %}
 <div class="due-strip">
-  <p><strong>{{ due }}</strong> question{% if due != 1 %}s{% endif %} due for review</p>
+  <p><strong>{{ due_count }}</strong> question{% if due_count != 1 %}s{% endif %} due for review</p>
   <a href="/review/take" class="btn btn-primary">Start review</a>
 </div>
 {% endif %}
@@ -22,7 +22,7 @@
   </div>
   <div class="figure">
     <dt>Due now</dt>
-    <dd>{{ due }}</dd>
+    <dd>{{ due_count or 0 }}</dd>
   </div>
   <div class="figure">
     <dt>Answered</dt>
@@ -46,7 +46,7 @@
   </p>
   <ul>
     <li>A new question comes back the next day.</li>
-    <li>Each correct answer stretches the gap (1 day, then 6, then roughly 15), so you spend less time on what you know.</li>
+    <li>Each correct answer stretches the gap (1 day, then 3, then about a week, growing each time), so you spend less time on what you know.</li>
     <li>A wrong answer counts as a lapse: the question starts over and comes back sooner.</li>
   </ul>
 </section>

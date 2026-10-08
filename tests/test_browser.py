@@ -33,7 +33,7 @@ def test_browser_flow(testapp):
     assert r.status_code == 200 and "Trees" in r.text and "trees.pdf" in r.text
 
     r = client.get(f"/resources/{rid}")
-    assert r.status_code == 200 and "Phase 2" in r.text
+    assert r.status_code == 200 and "No text yet" in r.text
 
     assert client.get("/courses/00000000-0000-0000-0000-000000000000").status_code == 404
     assert client.get("/health").json() == {"status": "ok"}
@@ -228,3 +228,40 @@ def test_cap_note_is_shown_as_a_note_not_an_error(testapp):
         s.commit()
     page = testapp["client"].get(f"/resources/{rid}").text
     assert f'<p class="muted">{note}</p>' in page and "resource-error" not in page
+
+
+def _resource_with_status(testapp, status: str, error: str | None = None) -> str:
+    with testapp["Session"]() as s:
+        course = Course(user_id=testapp["user_id"], source="moodle", source_id="cs",
+                        name="Status")
+        s.add(course)
+        s.commit()
+        topic = Topic(course_id=course.id, source_id="ts", title="T", order=0)
+        s.add(topic)
+        s.commit()
+        res = Resource(topic_id=topic.id, source="moodle", source_id="rs", type="file",
+                       title="file.pdf", status=status, error=error)
+        s.add(res)
+        s.commit()
+        return str(res.id)
+
+
+def test_resource_without_text_worded_by_status(testapp):
+    client = testapp["client"]
+    page = client.get(f"/resources/{_resource_with_status(testapp, 'pending')}").text
+    assert "No text yet" in page and "Phase" not in page
+
+
+def test_skipped_resource_gives_its_reason(testapp):
+    rid = _resource_with_status(testapp, "skipped", "file is over 50 MB")
+    page = testapp["client"].get(f"/resources/{rid}").text
+    assert "This file was skipped, so there's no text to show: file is over 50 MB." in page
+    assert "yet" not in page.split("Extracted text")[1]
+    assert page.count("file is over 50 MB") == 1  # not repeated in the header
+
+
+def test_failed_resource_says_it_failed(testapp):
+    rid = _resource_with_status(testapp, "failed", "PDF is encrypted")
+    page = testapp["client"].get(f"/resources/{rid}").text
+    assert "We couldn't read the text from this file" in page
+    assert "PDF is encrypted" in page and "No text yet" not in page

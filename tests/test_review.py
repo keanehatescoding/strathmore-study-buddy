@@ -511,3 +511,90 @@ def test_streak_runs_past_the_first_window(testapp, days, gap):
         s.commit()
         streak = compute_stats(s, user_id, tz=timezone.utc, now=now)["streak_days"]
     assert streak == (gap if gap is not None else days)
+
+
+def _seed_overdue(testapp, n: int) -> str:
+    """`n` overdue MCQs for the signed-in user; returns the course id."""
+    with testapp["Session"]() as s:
+        course = Course(user_id=testapp["user_id"], source="moodle", source_id="cq",
+                        name="Queue")
+        s.add(course)
+        s.commit()
+        topic = Topic(course_id=course.id, source_id="tq", title="T")
+        s.add(topic)
+        s.commit()
+        res = Resource(topic_id=topic.id, source="moodle", source_id="rq",
+                       type="file", title="R", status="extracted", extracted_text="t")
+        s.add(res)
+        s.commit()
+        chunk = Chunk(resource_id=res.id, title="Ch", content="t", order=0)
+        s.add(chunk)
+        s.commit()
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        for i in range(n):
+            item = QuizItem(chunk_id=chunk.id, question=f"Q{i}?", question_type="mcq",
+                            options=["a", "b"], correct_answer="0", generation_key=f"q{i}")
+            s.add(item)
+            s.commit()
+            s.add(ReviewState(user_id=testapp["user_id"], quiz_item_id=item.id,
+                              next_review_date=past, interval_days=1, repetitions=1))
+        s.commit()
+        return str(course.id)
+
+
+def test_review_page_counts_every_due_item(testapp):
+    _seed_overdue(testapp, 35)
+    page = testapp["client"].get("/review").text
+    assert "<strong>35</strong> questions due" in page
+    assert "Showing the next 20 of 35" in page
+    assert page.count('class="grow question"') == 20
+
+
+def test_review_page_without_truncation_note(testapp):
+    _seed_overdue(testapp, 3)
+    page = testapp["client"].get("/review").text
+    assert "<strong>3</strong> questions due" in page and "Showing the next" not in page
+
+
+def test_nav_badge_on_every_page(testapp):
+    client = testapp["client"]
+    cid = _seed_overdue(testapp, 2)
+    with testapp["Session"]() as s:
+        rid = str(s.exec(select(Resource)).one().id)
+    badge = '<span class="nav-count">2</span>'
+    for path in ["/", f"/courses/{cid}", f"/resources/{rid}", "/review",
+                 "/review/take", "/stats", "/settings/moodle"]:
+        page = client.get(path).text
+        assert badge in page, path
+        assert "test@x.edu" in page and 'href="/settings/moodle"' in page, path
+
+
+def test_error_page_keeps_the_account_header(testapp):
+    _seed_overdue(testapp, 2)
+    r = testapp["client"].get("/courses/00000000-0000-0000-0000-000000000000")
+    assert r.status_code == 404
+    assert "test@x.edu" in r.text and 'href="/settings/moodle"' in r.text
+    assert '<span class="nav-count">2</span>' in r.text
+
+
+def test_stats_schedule_copy_matches_srs():
+    from pathlib import Path
+
+    from app.srs import next_interval_days
+
+    first, reps, ease = next_interval_days(5, 0, 2.5, 0)
+    second, reps, ease = next_interval_days(5, reps, ease, first)
+    third, _, _ = next_interval_days(5, reps, ease, second)
+    assert (first, second) == (1, 3) and 7 <= third <= 9  # "about a week"
+    copy = (Path(__file__).parent.parent / "templates" / "stats.html").read_text()
+    assert f"({first} day, then {second}, then about a week, growing each time)" in copy
+
+
+def test_nav_badge_failure_still_renders_the_page(testapp, monkeypatch):
+    def broken(*a, **k):
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr("app.main.due_count", broken)
+    r = testapp["client"].get("/stats")
+    assert r.status_code == 200
+    assert "test@x.edu" in r.text and "nav-count" not in r.text

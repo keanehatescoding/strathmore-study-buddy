@@ -28,7 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, func, or_, select
 
-from app.chunk import chunk_resource, needs_llm
+from app.chunk import FAILED_JOIN, chunk_resource, needs_llm, text_cap_note
 from app.config import settings
 from app.db import engine
 from app.drive import DriveError
@@ -340,7 +340,10 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r is None or r.content_hash != seen_hash:
                 counts["changed"] += 1  # failure was on content since replaced
                 continue
-            _defer(r, f"{type(e).__name__}: {e}")
+            # keep the cap note: the retry chunks the same truncated text
+            note = text_cap_note(r.error)
+            failure = f"{type(e).__name__}: {e}"
+            _defer(r, f"{note}{FAILED_JOIN}{failure}" if note else failure)
             if r.attempts >= MAX_CHUNK_ATTEMPTS:
                 r.status = "failed"  # existing chunks, if any, are kept
             session.add(r)

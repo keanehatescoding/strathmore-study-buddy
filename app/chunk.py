@@ -33,6 +33,7 @@ MIN_LLM_CHARS = 300
 MIN_SPLIT_CHARS = 1000  # a truncated reply on a shorter section is an error
 SECTIONS_CAPPED = "sections are studied: the rest is past the size cap"
 SECTIONS_JOIN = ". Of those, "  # character cap note + section cap note
+FAILED_JOIN = ". Chunking failed: "  # character cap note + retryable error
 
 
 class ChunkingError(RuntimeError):
@@ -138,10 +139,10 @@ def chunk_sections(sections: list[str], llm: LLMClient,
 
 def text_cap_note(error: str | None) -> str | None:
     """The extraction (character) cap note in error, minus any section cap
-    note a previous chunking added, so re-chunking never stacks them."""
+    note or chunking error added since, so re-chunking never stacks them."""
     if not is_cap_note(error):
         return None
-    note = error.split(SECTIONS_JOIN)[0]
+    note = error.split(FAILED_JOIN)[0].split(SECTIONS_JOIN)[0]
     return None if note.endswith(SECTIONS_CAPPED) else note
 
 

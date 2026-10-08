@@ -1024,3 +1024,18 @@ def test_section_cap_keeps_the_character_cap_note(session):
     r.status = "failed"
     assert chunk_resource(session, r, FakeLLM()) > 0
     assert r.error == first
+
+
+def test_a_chunking_retry_keeps_the_character_cap_note(session):
+    from app.extract import cap_text
+
+    _, char_note = cap_text("x" * 10_000_000)
+    r = _resource(session, status="extracted", error=char_note, extracted_text="x" * 500)
+    run_chunking(session, FailingLLM())
+    session.refresh(r)
+    assert r.error.startswith(char_note) and "provider exploded" in r.error
+
+    _age(session, r)
+    assert run_chunking(session, FakeLLM()).counts["chunks"] == 2
+    session.refresh(r)
+    assert r.error == char_note

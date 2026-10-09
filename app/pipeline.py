@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlmodel import Session, delete, func, or_, select
 
 from app.chunk import FAILED_JOIN, chunk_resource, needs_llm, text_cap_note
@@ -203,6 +203,21 @@ def _share_failed(session: Session, rid, e: Exception, counts) -> Resource | Non
     return session.get(Resource, rid)
 
 
+def _save_db_failure(session: Session, rid, seen_hash, e: Exception) -> Resource | None:
+    """Mark a resource failed after the database refused its extraction (None
+    if it is gone or changed meanwhile). Left pending, it would come first,
+    and fail the same way, on every later run."""
+    session.rollback()
+    r = session.get(Resource, rid)
+    if r is None or r.content_hash != seen_hash:
+        return None
+    cause = getattr(e, "orig", None) or e  # the driver's message, not the SQL and its text
+    r.status = "failed"
+    r.error = f"couldn't save the extracted text: {type(cause).__name__}: {cause}"[:500]
+    session.add(r)
+    return r if commit_if_current(session, rid, seen_hash) else None
+
+
 def run_extraction(session: Session, downloader, course_id=None,
                    downloader_for=None, source=None,
                    deadline: float | None = None) -> StageResult:
@@ -269,7 +284,12 @@ def run_extraction(session: Session, downloader, course_id=None,
             r.error = f"{type(e).__name__}: {e}"[:500]
             outcome = "failed"
         session.add(r)
-        if not commit_if_current(session, rid, seen_hash):
+        try:
+            saved = commit_if_current(session, rid, seen_hash)
+        except DBAPIError as e:  # text the database won't store: fail this one, not the run
+            r = _save_db_failure(session, rid, seen_hash, e)
+            saved, outcome = r is not None, "failed"
+        if not saved:
             # a sync replaced the content meanwhile: it is pending again
             counts["changed"] += 1
             print(f"  extract {i}/{len(ids)} changed meanwhile, dropped", flush=True)

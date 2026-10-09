@@ -1047,3 +1047,57 @@ def test_skip_reason_is_kept(session):
     session.refresh(r)
     assert r.status == "skipped"
     assert r.error == "web links aren't read, only files, pages and videos"
+
+
+def test_nul_bytes_are_stripped_from_extracted_text(session, monkeypatch):
+    # pdf/pptx/docx text can carry NUL, which Postgres text columns reject
+    monkeypatch.setattr("app.pipeline.extract_resource_text", lambda r, dl: "a\x00b\x00")
+    _resource(session, raw_url="https://m.example/x.pdf")
+    assert run_extraction(session, lambda url: (b"", None)).counts["extracted"] == 1
+    assert session.exec(select(Resource)).one().extracted_text == "ab"
+
+
+def test_html_to_text_strips_nul():
+    from app.extract import html_to_text
+
+    assert html_to_text("<p>a\x00b</p>") == "ab"
+
+
+def _two_resources_one_unsaveable(session):
+    _resource(session, source_id="bad", raw_url="https://m.example/bad.txt")
+    _resource(session, source_id="ok", raw_url="https://m.example/ok.txt")
+    return lambda url: ((b"bad" if "bad" in url else b"fine"), "text/plain")
+
+
+def test_a_database_error_fails_one_resource_not_the_run(session, monkeypatch):
+    from sqlalchemy.exc import DataError
+
+    import app.pipeline as pipeline
+
+    downloader = _two_resources_one_unsaveable(session)
+    real = pipeline.commit_if_current
+
+    def commit(s, rid, seen_hash):
+        if s.get(Resource, rid).extracted_text == "bad":
+            raise DataError("INSERT", {}, Exception("text fields cannot contain NUL"))
+        return real(s, rid, seen_hash)
+
+    monkeypatch.setattr(pipeline, "commit_if_current", commit)
+    counts = run_extraction(session, downloader).counts
+    assert (counts["failed"], counts["extracted"]) == (1, 1)
+    by_id = {r.source_id: r for r in session.exec(select(Resource)).all()}
+    assert by_id["bad"].status == "failed" and "couldn't save" in by_id["bad"].error
+    assert "NUL" in by_id["bad"].error and "INSERT" not in by_id["bad"].error
+    assert by_id["bad"].extracted_text is None
+    assert by_id["ok"].status == "extracted"
+    # failed, not pending: the next run doesn't trip on it first
+    assert pending_resource_ids(session) == []
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="SQLite accepts NUL in text")
+def test_unstripped_nul_fails_only_its_resource_on_postgres(session, monkeypatch):
+    downloader = _two_resources_one_unsaveable(session)
+    monkeypatch.setattr("app.pipeline.cap_text", lambda text: (
+        text.replace("bad", "b\x00ad"), None))
+    counts = run_extraction(session, downloader).counts
+    assert (counts["failed"], counts["extracted"]) == (1, 1)

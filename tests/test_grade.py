@@ -357,3 +357,12 @@ def test_new_item_past_daily_cap_rejected(setup, monkeypatch):
     # a due review of an already-started item is still accepted
     _make_due(s, user, mcq)
     assert submit_answer(s, user.id, mcq.id, "1")["correct"] is True
+
+
+def test_nul_in_answer_is_stripped(setup):
+    # Postgres rejects NUL in last_answer: a pasted one must not 500
+    s, user, _, short = setup
+    llm = ReplyLLM({"correct": True, "partial_credit": 1.0})
+    submit_answer(s, user.id, short.id, "be\x00cause", llm)
+    state = s.exec(select(ReviewState).where(ReviewState.quiz_item_id == short.id)).one()
+    assert state.last_answer == "because"

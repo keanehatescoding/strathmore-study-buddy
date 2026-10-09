@@ -1101,3 +1101,124 @@ def test_unstripped_nul_fails_only_its_resource_on_postgres(session, monkeypatch
         text.replace("bad", "b\x00ad"), None))
     counts = run_extraction(session, downloader).counts
     assert (counts["failed"], counts["extracted"]) == (1, 1)
+
+
+def _sync_retires(session, rid):
+    """What sync does when a source stops listing a resource, committed
+    mid-run from its own session the way a worker sync job would."""
+    from app.sync import _retire, lock_resource
+
+    with Session(session.get_bind()) as sync:
+        lock_resource(sync, rid)
+        _retire(sync, sync.get(Resource, rid))
+        sync.commit()
+
+
+def _retired_after_listing(monkeypatch, session, lister):
+    """Retire the first listed resource right after the stage lists it."""
+    from app import pipeline
+
+    real = getattr(pipeline, lister)
+
+    def listed(*a, **kw):
+        ids = real(*a, **kw)
+        _sync_retires(session, ids[0])
+        return ids
+
+    monkeypatch.setattr(pipeline, lister, listed)
+
+
+def test_extraction_skips_a_resource_retired_after_listing(session, monkeypatch):
+    _resource(session, raw_url="https://m.example/a.txt", source_id="a")
+    _resource(session, raw_url="https://m.example/b.txt", source_id="b")
+    _retired_after_listing(monkeypatch, session, "pending_resource_ids")
+    counts = run_extraction(session, lambda url: (b"notes", "text/plain")).counts
+    assert counts["extracted"] == 1 and counts["changed"] == 1
+
+
+def test_extraction_drops_a_resource_retired_mid_download(session):
+    r = _resource(session, raw_url="https://m.example/notes.txt")
+    rid = r.id
+
+    def downloader(url):
+        _sync_retires(session, rid)
+        return b"notes", "text/plain"
+
+    counts = run_extraction(session, downloader).counts
+    assert counts["changed"] == 1 and counts["extracted"] == 0
+    session.expire_all()
+    assert session.get(Resource, rid) is None
+
+
+def test_chunking_skips_a_resource_retired_after_listing(session, monkeypatch):
+    _resource(session, status="extracted", extracted_text="x" * 500, source_id="a")
+    _resource(session, status="extracted", extracted_text="y" * 500, source_id="b")
+    _retired_after_listing(monkeypatch, session, "chunkable_resource_ids")
+    counts = run_chunking(session, FakeLLM()).counts
+    assert counts["resources"] == 1 and counts["changed"] == 1
+
+
+def test_chunking_drops_a_resource_retired_mid_call(session):
+    r = _resource(session, status="extracted", extracted_text="x" * 500)
+    rid = r.id
+
+    class RetiringLLM(FakeLLM):
+        def complete_json(self, system, user, **kw):
+            _sync_retires(session, rid)
+            return super().complete_json(system, user, **kw)
+
+    counts = run_chunking(session, RetiringLLM()).counts
+    assert counts["changed"] == 1 and counts["chunks"] == 0
+    session.expire_all()
+    assert session.get(Resource, rid) is None
+    assert session.exec(select(Chunk)).all() == []
+
+
+def test_chunking_failure_on_a_retired_resource_is_not_an_error(session):
+    r = _resource(session, status="extracted", extracted_text="x" * 500)
+    rid = r.id
+
+    class RetiringFailingLLM:
+        def complete_json(self, *a, **kw):
+            _sync_retires(session, rid)
+            raise RuntimeError("provider 500")
+
+    counts = run_chunking(session, RetiringFailingLLM()).counts
+    assert counts["changed"] == 1 and "errors" not in counts
+
+
+def test_quiz_on_a_resource_retired_mid_call_is_dropped(session):
+    from app.models import QuizFailure
+    from app.pipeline import run_quiz
+
+    chunk = _quiz_chunk(session)
+    rid, chunk_id = chunk.resource_id, chunk.id
+
+    class RetiringQuizLLM:
+        def complete_json(self, *a, **kw):
+            _sync_retires(session, rid)
+            return {"items": []}
+
+    counts = run_quiz(session, RetiringQuizLLM()).counts
+    assert "errors" not in counts and counts["items"] == 0
+    session.expire_all()
+    assert session.get(Chunk, chunk_id) is None
+    assert session.exec(select(QuizFailure)).all() == []
+
+
+def test_quiz_skips_a_chunk_retired_after_listing(session, monkeypatch):
+    from app.pipeline import run_quiz
+
+    _quiz_chunk(session)
+    from app import pipeline
+
+    real = pipeline.quiz_chunk_ids
+
+    def listed(*a, **kw):
+        ids = real(*a, **kw)
+        _sync_retires(session, session.get(Chunk, ids[0]).resource_id)
+        return ids
+
+    monkeypatch.setattr(pipeline, "quiz_chunk_ids", listed)
+    counts = run_quiz(session, FlakyQuizLLM(fail=99)).counts
+    assert counts["changed"] == 1 and "errors" not in counts

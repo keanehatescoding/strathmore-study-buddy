@@ -1222,3 +1222,49 @@ def test_quiz_skips_a_chunk_retired_after_listing(session, monkeypatch):
     monkeypatch.setattr(pipeline, "quiz_chunk_ids", listed)
     counts = run_quiz(session, FlakyQuizLLM(fail=99)).counts
     assert counts["changed"] == 1 and "errors" not in counts
+
+
+def _retired_on(monkeypatch, session, rid, step):
+    """Retire rid right after the stage runs `step`, i.e. just before its
+    guarded save of that resource."""
+    from app import pipeline
+
+    real = getattr(pipeline, step)
+
+    def then_retire(r, *a, **kw):
+        out = real(r, *a, **kw)
+        _sync_retires(session, rid)
+        return out
+
+    monkeypatch.setattr(pipeline, step, then_retire)
+
+
+def test_chunking_success_save_on_a_retired_resource_is_changed(session, monkeypatch):
+    r = _resource(session, status="extracted", extracted_text="x" * 500, attempts=1)
+    _retired_on(monkeypatch, session, r.id, "_succeeded")
+    counts = run_chunking(session, FakeLLM()).counts
+    assert counts["changed"] == 1
+    assert (counts["chunks"], counts["resources"]) == (0, 0)
+
+
+def test_chunking_error_save_on_a_retired_resource_is_changed(session, monkeypatch):
+    r = _resource(session, status="extracted", extracted_text="x" * 500)
+    _retired_on(monkeypatch, session, r.id, "_defer")
+
+    class FailingLLM:
+        def complete_json(self, *a, **kw):
+            raise RuntimeError("provider 500")
+
+    counts = run_chunking(session, FailingLLM()).counts
+    assert counts["changed"] == 1 and "errors" not in counts
+
+
+def test_chunking_shared_save_on_a_retired_resource_is_changed(session, monkeypatch):
+    from app import pipeline
+
+    r = _resource(session, status="extracted", extracted_text="x" * 500, attempts=1)
+    monkeypatch.setattr(pipeline, "copy_chunks", lambda session, r: 3)
+    _retired_on(monkeypatch, session, r.id, "_succeeded")
+    counts = run_chunking(session, FakeLLM()).counts
+    assert counts["changed"] == 1 and "shared" not in counts
+    assert (counts["chunks"], counts["resources"]) == (0, 0)

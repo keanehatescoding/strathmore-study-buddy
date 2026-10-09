@@ -338,7 +338,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r.attempts or r.retry_after:
                 _succeeded(r)
                 session.add(r)
-                commit_if_current(session, rid, seen_hash)
+                if not commit_if_current(session, rid, seen_hash):
+                    counts["changed"] += 1  # its copied chunks went with the old content
+                    continue
             counts["chunks"] += shared
             counts["resources"] += 1
             counts["shared"] += 1
@@ -373,7 +375,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r.attempts >= MAX_CHUNK_ATTEMPTS:
                 r.status = "failed"  # existing chunks, if any, are kept
             session.add(r)
-            commit_if_current(session, rid, seen_hash)
+            if not commit_if_current(session, rid, seen_hash):
+                counts["changed"] += 1
+                continue
             counts["errors"] += 1
             print(f"  error on resource {rid} (try {r.attempts}): {str(e)[:120]}",
                   flush=True)
@@ -381,7 +385,10 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
         if r.attempts or r.retry_after:
             _succeeded(r)
             session.add(r)
-            commit_if_current(session, rid, seen_hash)
+            if not commit_if_current(session, rid, seen_hash):
+                counts["changed"] += 1
+                print(f"  chunk {i}/{len(ids)} changed meanwhile, dropped", flush=True)
+                continue
         counts["chunks"] += n
         print(f"  chunk {i}/{len(ids)} +{n}: {r.title[:60]}", flush=True)
         if n:

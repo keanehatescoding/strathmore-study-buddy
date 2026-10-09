@@ -2,7 +2,7 @@ import hmac
 import logging
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -131,13 +131,21 @@ def current_user(
     """The signed-in user. A session ends when the user is deleted, their
     sessions are revoked (session_version bumped: logout, admin_cli), or
     their address leaves ALLOWED_EMAILS."""
+    user = _session_user(request, session)
+    if user is None:
+        request.session.clear()  # so /login doesn't bounce back to /
+        raise HTTPException(status_code=401, detail="login required")
+    request.state.user = user  # for nav_context
+    return user
+
+
+def _session_user(request: Request, session: Session) -> User | None:
     user_id = request.session.get("user_id")
     user = session.get(User, UUID(user_id)) if _is_uuid(user_id) else None
     if (user is None
             or request.session.get("session_version") != user.session_version
             or not email_allowed(user.email)):
-        request.session.clear()  # so /login doesn't bounce back to /
-        raise HTTPException(status_code=401, detail="login required")
+        return None
     return user
 
 
@@ -170,6 +178,27 @@ def csrf_token(request: Request) -> str:
 
 
 templates.env.globals["session_csrf_token"] = csrf_token
+
+
+def nav_context(request: Request) -> dict:
+    """The header's account email, Settings link and Review badge, for every
+    page (error pages too): routes don't each pass them, so none can forget."""
+    known = getattr(request.state, "user", None)
+    if known is None and not ("session" in request.scope and request.session.get("user_id")):
+        return {}
+    make_session = contextmanager(app.dependency_overrides.get(get_session, get_session))
+    try:
+        with make_session() as session:
+            user = session.get(User, known.id) if known else _session_user(request, session)
+            if user is None:
+                return {}
+            return {"user": user, "due_count": due_count(session, user.id)}
+    except Exception:  # e.g. the database is down: render the page without the badge
+        log.exception("nav context failed")
+        return {"user": known} if known else {}
+
+
+templates.context_processors.append(nav_context)
 
 # Region/City zones only; the bare aliases ("EST", "Etc/GMT+3") just clutter the picker.
 TIMEZONES = sorted({settings.timezone} | {
@@ -395,8 +424,6 @@ def course_list(
             "counts": counts,
             # only needed to explain an empty list
             "sync_state": None if courses else sync_state(session, user),
-            "user": user,
-            "due_count": due_count(session, user.id),
             "active_page": "courses",
         },
     )
@@ -432,7 +459,6 @@ def course_detail(
             "resources_by_topic": resources_by_topic,
             "assignments": upcoming,
             "past_assignments": past,
-            "user": user,
             "active_page": "courses",
         },
     )
@@ -522,7 +548,6 @@ def resource_detail(
             "passage": source_passage(resource.extracted_text, source) if source else None,
             "original_url": _original_url(resource),
             "preview_chars": RESOURCE_PREVIEW_CHARS,
-            "user": user,
             "active_page": "courses",
         },
     )
@@ -551,7 +576,6 @@ def review_queue(
         "review.html",
         {
             "items": due_items(session, user.id),
-            "user": user,
             "active_page": "review",
         },
     )
@@ -576,7 +600,6 @@ def _take_page(
             "answer": "",
             "max_answer_chars": MAX_ANSWER_CHARS,
             "csrf_token": csrf_token(request),
-            "user": user,
             "active_page": "review",
         } | ctx,
         status_code=status_code,
@@ -592,7 +615,7 @@ def review_take(
     queue = due_items(session, user.id)
     if not queue:
         return templates.TemplateResponse(
-            request, "review.html", {"items": [], "user": user, "active_page": "review"}
+            request, "review.html", {"items": [], "active_page": "review"}
         )
     return _take_page(request, session, user, queue[0])
 
@@ -694,8 +717,6 @@ def stats_page(
         "stats.html",
         {
             "stats": compute_stats(session, user.id),
-            "due": due_count(session, user.id),
-            "user": user,
             "active_page": "stats",
         },
     )
@@ -728,8 +749,6 @@ def moodle_settings(
             "notify_email": user.notify_email,
             "flash": request.session.pop("flash", None),
             "csrf_token": csrf_token(request),
-            "user": user,
-            "due_count": due_count(session, user.id),
             "active_page": "settings",
         },
     )

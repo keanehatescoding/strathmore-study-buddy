@@ -10,6 +10,7 @@ import os
 os.environ.setdefault("DEV", "1")
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
@@ -46,9 +47,11 @@ def testapp():
         with Session(engine) as s:
             yield s
 
-    def override_user():
+    def override_user(request: Request):
         with Session(engine) as s:
-            return s.get(User, user_id)
+            user = s.get(User, user_id)
+        request.state.user = user  # as current_user does, for nav_context
+        return user
 
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[current_user] = override_user

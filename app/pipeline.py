@@ -247,9 +247,9 @@ def run_extraction(session: Session, downloader, course_id=None,
                 r.status = "skipped"
                 r.error = "no text extracted"
                 outcome = "skipped"
-        except SkipResource:
+        except SkipResource as e:
             r.status = "skipped"
-            r.error = None
+            r.error = str(e)[:500] or None  # the reason, shown on the resource page
             outcome = "skipped"
         except ForeignURLError as e:
             r.status = "failed"  # not a Moodle file; retrying can't help

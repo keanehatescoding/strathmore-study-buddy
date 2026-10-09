@@ -20,6 +20,7 @@ from sqlalchemy import and_
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlmodel import Session, func, select
 
+from app.extract import strip_nul
 from app.llm import LLMClient
 from app.llm_schemas import GradeOut
 from app.models import (
@@ -172,6 +173,7 @@ def submit_answer(
     item = session.get(QuizItem, quiz_item_id)
     if item is None:
         raise ValueError(f"quiz item {quiz_item_id} not found")
+    answer = strip_nul(answer)  # stored in last_answer: Postgres rejects NUL
     if len(answer) > MAX_ANSWER_CHARS:
         raise InvalidAnswer(f"Answers are limited to {MAX_ANSWER_CHARS:,} characters.")
     now = datetime.now(timezone.utc)

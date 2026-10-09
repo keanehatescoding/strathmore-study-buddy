@@ -43,9 +43,16 @@ def too_large_message(what: str = "file") -> str:
     return f"{what} is over {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB"
 
 
+def strip_nul(text: str) -> str:
+    """Drop NUL characters: Postgres text columns reject them."""
+    return text.replace("\x00", "")
+
+
 def cap_text(text: str) -> tuple[str, str | None]:
-    """Truncate text over MAX_EXTRACTED_CHARS, on a line break when one is
-    close to the cap; returns (text, note), the note None when untouched."""
+    """Strip NULs, then truncate text over MAX_EXTRACTED_CHARS, on a line break
+    when one is close to the cap; returns (text, note), the note None when
+    untouched by the cap. Every extractor's output passes through here."""
+    text = strip_nul(text)
     if len(text) <= MAX_EXTRACTED_CHARS:
         return text, None
     cut = text.rfind("\n", 0, MAX_EXTRACTED_CHARS)
@@ -229,7 +236,7 @@ def decode_text(blob: bytes) -> str:
             text = blob.decode("utf-8")
         except UnicodeDecodeError:
             text = blob.decode("latin-1")
-    return text.replace("\x00", "")
+    return strip_nul(text)
 
 
 class _TextParser(HTMLParser):
@@ -266,7 +273,7 @@ def html_to_text(html: str) -> str:
     """Readable text from an HTML page: tags, scripts and styles dropped,
     entities decoded, block elements on their own lines."""
     parser = _TextParser()
-    parser.feed(html)
+    parser.feed(strip_nul(html))
     parser.close()
     lines = (" ".join(line.split()) for line in "".join(parser.parts).splitlines())
     text = "\n".join(line.removeprefix("| ") for line in lines)

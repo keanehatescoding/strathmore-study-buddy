@@ -24,6 +24,13 @@
   </form>
 </header>
 
+{% if course_due %}
+<div class="due-strip">
+  <p><strong>{{ course_due }}</strong> question{% if course_due != 1 %}s{% endif %} due in this course</p>
+  <a href="/review/take?course={{ course.id }}" class="btn btn-primary">Review this course</a>
+</div>
+{% endif %}
+
 {% if assignments or past_assignments %}
 <section class="assignments">
   <h2>Upcoming assignments</h2>

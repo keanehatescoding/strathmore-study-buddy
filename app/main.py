@@ -467,6 +467,7 @@ def course_detail(
             "resources_by_topic": resources_by_topic,
             "assignments": upcoming,
             "past_assignments": past,
+            "course_due": 0 if course.archived else due_count(session, user.id, course.id),
             "csrf_token": csrf_token(request),
             "active_page": "courses",
         },
@@ -609,21 +610,45 @@ def resource_text(
     return PlainTextResponse(resource.extracted_text)
 
 
+def _review_course(session: Session, user: User, course_id: UUID | None) -> Course | None:
+    """The course ?course= narrows a review to, or None for every course."""
+    return owned_course(session, user, course_id) if course_id else None
+
+
+def _course_id(course: Course | None) -> UUID | None:
+    return course.id if course else None
+
+
+def _scoped(path: str, course: Course | None) -> str:
+    """`path` kept inside a single-course review. The id is the stored
+    course's, not the request's."""
+    return f"{path}?course={course.id}" if course else path
+
+
 @app.get("/review", response_class=HTMLResponse)
 def review_queue(
     request: Request,
+    course: UUID | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    return _queue_page(request, session, user, due_items(session, user.id))
+    scope = _review_course(session, user, course)
+    items = due_items(session, user.id, course_id=_course_id(scope))
+    return _queue_page(request, session, user, items, scope)
 
 
-def _queue_page(request: Request, session: Session, user: User, items: list):
+def _queue_page(
+    request: Request, session: Session, user: User, items: list,
+    course: Course | None = None,
+):
     return templates.TemplateResponse(
         request,
         "review.html",
         {
             "items": items,
+            "review_course": course,
+            "course_due": due_count(session, user.id, course.id) if course else None,
+            "scope": _scoped("", course),
             "suspended_count": len(suspended_items(session, user.id)),
             "active_page": "review",
         },
@@ -632,10 +657,10 @@ def _queue_page(request: Request, session: Session, user: User, items: list):
 
 def _take_page(
     request: Request, session: Session, user: User, item: QuizItem,
-    status_code: int = 200, **ctx,
+    course: Course | None = None, status_code: int = 200, **ctx,
 ):
     # the answered item is no longer due; an unanswered one still counts itself
-    remaining = due_count(session, user.id)
+    remaining = due_count(session, user.id, _course_id(course))
     if not ctx.get("result"):
         remaining = max(0, remaining - 1)
     return templates.TemplateResponse(
@@ -644,6 +669,8 @@ def _take_page(
         {
             "item": item,
             "remaining": remaining,
+            "review_course": course,
+            "scope": _scoped("", course),
             "result": None,
             "error": None,
             "answer": "",
@@ -660,13 +687,15 @@ def _take_page(
 @app.get("/review/take", response_class=HTMLResponse)
 def review_take(
     request: Request,
+    course: UUID | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    queue = due_items(session, user.id)
+    scope = _review_course(session, user, course)
+    queue = due_items(session, user.id, course_id=_course_id(scope))
     if not queue:
-        return _queue_page(request, session, user, [])
-    return _take_page(request, session, user, queue[0])
+        return _queue_page(request, session, user, [], scope)
+    return _take_page(request, session, user, queue[0], scope)
 
 
 @app.get("/review/suspended", response_class=HTMLResponse)
@@ -687,38 +716,49 @@ def review_suspended(
     )
 
 
-def _flag_owned_item(session: Session, user: User, item_id: UUID, change, *args) -> None:
-    """Apply a grade.*_item change to one of the user's own items, else 404."""
+def _flag_owned_item(
+    session: Session, user: User, item_id: UUID, change, *args,
+    course_id: UUID | None = None,
+) -> str:
+    """Apply a grade.*_item change to one of the user's own items, else 404.
+    Returns where the review goes on: the next question, in `course_id`'s
+    course when the review is narrowed to one (the item must be in it)."""
+    course = _review_course(session, user, course_id)
     item = session.get(QuizItem, item_id)
-    if item is None or not user_owns_item(session, user.id, item_id):
+    if item is None or not user_owns_item(session, user.id, item_id, _course_id(course)):
         raise HTTPException(404, "quiz item not found")
     change(session, user.id, item.id, *args)
+    return _scoped("/review/take", course)
 
 
 @app.post("/review/{item_id}/skip")
 async def review_skip(
     item_id: UUID,
     request: Request,
+    course: UUID | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
     await checked_form(request)
-    await run_in_threadpool(_flag_owned_item, session, user, item_id, skip_item)
-    return RedirectResponse("/review/take", status_code=303)
+    next_url = await run_in_threadpool(
+        _flag_owned_item, session, user, item_id, skip_item, course_id=course)
+    return RedirectResponse(next_url, status_code=303)
 
 
 @app.post("/review/{item_id}/suspend")
 async def review_suspend(
     item_id: UUID,
     request: Request,
+    course: UUID | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
     form = await checked_form(request)
     reason, note = str(form.get("reason", "")), str(form.get("note", ""))
-    await run_in_threadpool(
-        _flag_owned_item, session, user, item_id, suspend_item, reason, note)
-    return RedirectResponse("/review/take", status_code=303)
+    next_url = await run_in_threadpool(
+        _flag_owned_item, session, user, item_id, suspend_item, reason, note,
+        course_id=course)
+    return RedirectResponse(next_url, status_code=303)
 
 
 @app.post("/review/{item_id}/restore")
@@ -733,29 +773,34 @@ async def review_restore(
     return RedirectResponse("/review/suspended", status_code=303)
 
 
-def _result_path(item: QuizItem) -> str:
+def _result_path(item: QuizItem, course: Course | None = None) -> str:
     # built from the stored item's id via the route table, not from request input
-    return app.url_path_for("review_result", item_id=str(item.id))
+    return _scoped(app.url_path_for("review_result", item_id=str(item.id)), course)
 
 
 @app.post("/review/{item_id}/answer", response_class=HTMLResponse)
 async def review_answer(
     item_id: UUID,
     request: Request,
+    course: UUID | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
     form = await checked_form(request)
     answer = str(form.get("answer", ""))
     # the DB work and grading are blocking: keep them off the event loop
-    return await run_in_threadpool(_answer_and_redirect, request, session, user, item_id, answer)
+    return await run_in_threadpool(
+        _answer_and_redirect, request, session, user, item_id, answer, course)
 
 
 def _answer_and_redirect(
     request: Request, session: Session, user: User, item_id: UUID, answer: str,
+    course_id: UUID | None = None,
 ):
+    course = _review_course(session, user, course_id)
     item = session.get(QuizItem, item_id)
-    if item is None or not user_owns_item(session, user.id, item_id):
+    # in a single-course review the item has to be that course's
+    if item is None or not user_owns_item(session, user.id, item_id, _course_id(course)):
         raise HTTPException(404, "quiz item not found")
     try:
         llm = None
@@ -769,37 +814,40 @@ def _answer_and_redirect(
         submit_answer(session, user.id, item.id, answer, llm)
     except NotDue:
         # a replayed or double submit: show what was already recorded
-        return RedirectResponse(_result_path(item), status_code=303)
+        return RedirectResponse(_result_path(item, course), status_code=303)
     except InvalidAnswer as e:
-        return _take_page(request, session, user, item, status_code=400,
+        return _take_page(request, session, user, item, course, status_code=400,
                           error=str(e), answer=answer)
     except LLMError:
         # Nothing was recorded; hand the answer back so it isn't lost.
         return _take_page(
-            request, session, user, item, status_code=503, answer=answer,
+            request, session, user, item, course, status_code=503, answer=answer,
             error="The grader is unavailable right now. Your answer is below — try again shortly.",
         )
     # Post/Redirect/Get: refresh or back can't resubmit the answer
     # only the id: the result itself is read back from ReviewState, since
     # feedback can outgrow the signed session cookie
     request.session["review_result"] = str(item.id)
-    return RedirectResponse(_result_path(item), status_code=303)
+    return RedirectResponse(_result_path(item, course), status_code=303)
 
 
 @app.get("/review/{item_id}/result", response_class=HTMLResponse)
 def review_result(
     item_id: UUID,
     request: Request,
+    course: UUID | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
+    scope = _review_course(session, user, course)
     item = session.get(QuizItem, item_id)
     state = session.exec(select(ReviewState).where(
         ReviewState.user_id == user.id, ReviewState.quiz_item_id == item_id
     )).first()
     if (request.session.get("review_result") != str(item_id) or item is None
-            or state is None or not user_owns_item(session, user.id, item_id)):
-        return RedirectResponse("/review/take", status_code=303)
+            or state is None
+            or not user_owns_item(session, user.id, item_id, _course_id(scope))):
+        return RedirectResponse(_scoped("/review/take", scope), status_code=303)
     result = {
         "correct": state.last_result == "correct",
         "verdict": state.last_result,
@@ -816,7 +864,7 @@ def review_result(
     resource = session.get(Resource, chunk.resource_id) if chunk else None
     if resource is not None:
         result["source"] = {"resource": resource, "chunk": chunk}
-    return _take_page(request, session, user, item, result=result)
+    return _take_page(request, session, user, item, scope, result=result)
 
 
 @app.get("/stats", response_class=HTMLResponse)

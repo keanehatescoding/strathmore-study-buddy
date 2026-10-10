@@ -343,13 +343,35 @@ def _undeliverable(session: Session, event: NotificationEvent) -> str | None:
         return "opted_out"
     # a reminder queued long enough (outage, no API key) for its user to
     # go inactive is as stale as one check_review_due would now skip
-    if event.type == "review_due" and not _recently_active(session, user):
-        return "inactive"
+    if event.type == "review_due":
+        if not _recently_active(session, user):
+            return "inactive"
+        if not _still_due(session, user):
+            return "not_due"
+    if event.type == "new_material" and _is_uuid(event.payload.get("course_id")):
+        course = session.get(Course, uuid.UUID(event.payload["course_id"]))
+        if course is not None and course.archived:
+            return "archived"
     return None
 
 
+def _still_due(session: Session, user: User) -> bool:
+    """Whether a queued reminder still holds: its questions may have been
+    answered, or archived with their course, since it was queued."""
+    return due_count(session, user.id) >= REVIEW_DUE_THRESHOLD
+
+
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return value is not None
+
+
 # Reasons that will never change on retry: the event is marked failed, not requeued.
-PERMANENT_FAILURES = {"no_recipient", "unknown_event_type", "opted_out", "inactive"}
+PERMANENT_FAILURES = {"no_recipient", "unknown_event_type", "opted_out", "inactive",
+                      "not_due", "archived"}
 GAVE_UP = "gave_up"  # failed_reason after MAX_SEND_ATTEMPTS failed deliveries
 
 

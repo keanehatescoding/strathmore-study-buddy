@@ -165,9 +165,13 @@ class _Calls(list):
         self.keys = []
 
 
-def _fake_batches(monkeypatch, fail=lambda emails: None):
-    """Record each send_batch call; `fail` may raise to simulate errors."""
+def _fake_batches(monkeypatch, fail=lambda emails: None, real_due=False):
+    """Record each send_batch call; `fail` may raise to simulate errors.
+    Queued reminders count as still due (most tests here queue them for
+    users with no questions) unless `real_due`."""
     calls = _Calls()
+    if not real_due:
+        monkeypatch.setattr(notify, "_still_due", lambda session, user: True)
 
     def fake(api_key, emails, idempotency_key, sleep=None):
         fail(emails)
@@ -650,6 +654,7 @@ def _record_keys(monkeypatch, fail=lambda key: None):
         fail(key)
 
     monkeypatch.setattr(notify, "send_batch", fake)
+    monkeypatch.setattr(notify, "_still_due", lambda session, user: True)
     return seen
 
 
@@ -831,6 +836,28 @@ def test_stale_review_due_fails_at_delivery(session, monkeypatch):
     out = notify.send_pending(session, "key", "from@x")
     assert out == {"sent": 0, "failed": 1, "errors": {"inactive": 1}}
     assert calls == [] and event.failed_reason == "inactive"
+
+
+def test_events_queued_before_archiving_are_not_sent(session, monkeypatch):
+    calls = _fake_batches(monkeypatch, real_due=True)
+    user, course = _course_with_items(session, n_chunks=3)
+    news = notify.enqueue_new_material(session, course.id, 5)
+    reminder = notify.check_review_due(session, user.id, threshold=3)
+    assert news is not None and reminder is not None
+    _set(session, course, archived=True)
+    out = notify.send_pending(session, "key", "from@x")
+    assert out == {"sent": 0, "failed": 2, "errors": {"archived": 1, "not_due": 1}}
+    assert calls == []
+    assert (news.failed_reason, reminder.failed_reason) == ("archived", "not_due")
+
+
+def test_queued_events_of_an_active_course_still_send(session, monkeypatch):
+    calls = _fake_batches(monkeypatch, real_due=True)
+    user, course = _course_with_items(session, n_chunks=3)
+    notify.enqueue_new_material(session, course.id, 5)
+    notify.check_review_due(session, user.id, threshold=3)
+    out = notify.send_pending(session, "key", "from@x")
+    assert out == {"sent": 2, "failed": 0, "errors": {}} and len(calls) == 1
 
 
 def test_opt_out_fails_queued_events(session, monkeypatch):

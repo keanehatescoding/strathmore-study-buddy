@@ -828,3 +828,173 @@ def test_pipeline_job_runs_in_slices_behind_other_jobs(session, monkeypatch):
     items = session.exec(select(QuizItem)).all()
     assert len(items) == 6  # 2 per chunk, none twice
     assert sorted(Counter(i.chunk_id for i in items).values()) == [2, 2, 2]
+
+
+@pytest.fixture()
+def no_shared_keys(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "moodle_token", "")
+    monkeypatch.setattr(settings, "google_refresh_token", "")
+
+
+def _sync_jobs(session):
+    session.expire_all()
+    return session.exec(select(Job).where(Job.type == "sync").order_by(Job.created_at)).all()
+
+
+def test_request_sync_queues_each_connected_source(session, no_shared_keys):
+    from app.auth import sign_in
+    from app.models import User
+    from app.moodle_tokens import encrypt_token
+
+    nobody = User(email="n@x.edu")
+    session.add(nobody)
+    session.commit()
+    assert jobs.request_sync(session, nobody) == ("disconnected", None)
+    assert _sync_jobs(session) == []
+
+    user = sign_in(session, "s@x.edu", "refresh-token")  # Classroom only
+    assert jobs.request_sync(session, user) == ("queued", None)
+    assert [j.payload for j in _sync_jobs(session)] == [
+        {"source": "classroom", "user_email": "s@x.edu", "course_id": None}]
+
+    both = sign_in(session, "b@x.edu", "refresh-token")
+    _set(session, both, moodle_token=encrypt_token("key"))
+    assert jobs.request_sync(session, both) == ("queued", None)
+    mine = [j for j in _sync_jobs(session) if j.payload["user_email"] == "b@x.edu"]
+    assert sorted(j.payload["source"] for j in mine) == ["classroom", "moodle"]
+    assert all(j.status == "pending" for j in mine)
+
+
+def test_request_sync_once_per_ten_minutes(session, no_shared_keys):
+    from app.auth import sign_in
+
+    user = sign_in(session, "s@x.edu", "refresh-token")
+    other = sign_in(session, "o@x.edu", "refresh-token")
+    assert jobs.request_sync(session, user)[0] == "queued"
+    assert jobs.request_sync(session, user) == ("syncing", None)  # still pending
+    _set(session, _sync_jobs(session)[0], status="running")
+    assert jobs.request_sync(session, user) == ("syncing", None)
+    assert len(_sync_jobs(session)) == 1
+
+    queued_at = datetime.now(timezone.utc)
+    _set(session, _sync_jobs(session)[0], status="completed", created_at=queued_at)
+    outcome, wait = jobs.request_sync(session, user, now=queued_at + timedelta(minutes=4))
+    assert outcome == "wait" and wait == timedelta(minutes=6)
+    assert len(_sync_jobs(session)) == 1
+    # someone else's sync doesn't use up this user's turn, nor theirs ours
+    assert jobs.request_sync(session, other)[0] == "queued"
+
+    later = queued_at + jobs.MANUAL_SYNC_EVERY
+    assert jobs.request_sync(session, user, now=later) == ("queued", None)
+    assert [j.status for j in _sync_jobs(session)
+            if j.payload["user_email"] == "s@x.edu"] == ["completed", "pending"]
+
+
+def test_request_sync_counts_a_failed_or_cron_sync_too(session, no_shared_keys):
+    from app.auth import sign_in
+
+    user = sign_in(session, "s@x.edu", "refresh-token")
+    # e.g. the nightly cron's, which just failed: retrying at once won't help
+    session.add(Job(type="sync", status="failed",
+                    payload={"source": "classroom", "user_email": "s@x.edu"}))
+    session.commit()
+    assert jobs.request_sync(session, user)[0] == "wait"
+    _set(session, _sync_jobs(session)[0],
+         created_at=datetime.now(timezone.utc) - timedelta(minutes=11))
+    assert jobs.request_sync(session, user) == ("queued", None)
+
+
+def _connect(testapp, **fields):
+    from app.models import User
+    from app.moodle_tokens import encrypt_token
+
+    with testapp["Session"]() as s:
+        user = s.get(User, testapp["user_id"])
+        user.moodle_token = encrypt_token("key")
+        for k, v in fields.items():
+            setattr(user, k, v)
+        s.add(user)
+        s.commit()
+
+
+def _home_token(client):
+    import re
+
+    return re.search(r'name="csrf_token" value="([^"]+)"', client.get("/").text).group(1)
+
+
+SYNC_BUTTON = 'action="/sync"'
+
+
+def test_sync_now_button_queues_a_sync(testapp, no_shared_keys):
+    from app.models import Course
+
+    client = testapp["client"]
+    _connect(testapp)
+    home = client.get("/").text
+    assert "No courses synced yet" in home and SYNC_BUTTON in home
+
+    r = client.post("/sync", data={"csrf_token": _home_token(client)}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    with testapp["Session"]() as s:
+        (job,) = _sync_jobs(s)
+        assert job.status == "pending"
+        assert job.payload == {"source": "moodle", "user_email": "test@x.edu",
+                               "course_id": None}
+    home = client.get("/").text
+    assert "Your courses are syncing" in home  # the empty state says so: no flash
+    assert SYNC_BUTTON not in home and 'class="notice' not in home
+
+    # a stale tab's button, pressed again while that one is queued
+    client.post("/sync", data={"csrf_token": _home_token(client)})
+    with testapp["Session"]() as s:
+        assert len(_sync_jobs(s)) == 1
+        s.add(Course(user_id=testapp["user_id"], source="moodle", source_id="c1",
+                     name="Maths"))
+        s.commit()
+    home = client.get("/").text  # with courses listed, a banner says it instead
+    assert "Syncing your courses now" in home and "Maths" in home
+    assert SYNC_BUTTON not in home
+
+
+def test_sync_now_is_rate_limited(testapp, no_shared_keys):
+    client = testapp["client"]
+    _connect(testapp)
+    token = _home_token(client)
+    client.post("/sync", data={"csrf_token": token})
+    with testapp["Session"]() as s:
+        _set(s, _sync_jobs(s)[0], status="completed")
+
+    assert SYNC_BUTTON in client.get("/").text  # finished: the button is back
+    r = client.post("/sync", data={"csrf_token": token})  # follows to /
+    assert "You can sync again in 10 minutes." in r.text
+    assert "sync again" not in client.get("/").text  # shown once
+    with testapp["Session"]() as s:
+        assert len(_sync_jobs(s)) == 1
+        _set(s, _sync_jobs(s)[0],
+             created_at=datetime.now(timezone.utc) - timedelta(minutes=9, seconds=30))
+    assert "You can sync again in 1 minute." in client.post(
+        "/sync", data={"csrf_token": token}).text
+
+    with testapp["Session"]() as s:
+        _set(s, _sync_jobs(s)[0],
+             created_at=datetime.now(timezone.utc) - timedelta(minutes=10, seconds=1))
+    client.post("/sync", data={"csrf_token": token})
+    with testapp["Session"]() as s:
+        assert [j.status for j in _sync_jobs(s)] == ["completed", "pending"]
+
+
+def test_sync_now_needs_a_connection_and_a_csrf_token(testapp, no_shared_keys):
+    client = testapp["client"]
+    home = client.get("/").text
+    assert "No account connected" in home and SYNC_BUTTON not in home
+    token = _home_token(client)  # the sign-out form's
+    r = client.post("/sync", data={"csrf_token": token})
+    assert "Nothing to sync yet" in r.text
+    _connect(testapp)
+    assert client.post("/sync", data={}).status_code == 403
+    assert client.post("/sync", data={"csrf_token": "wrong"}).status_code == 403
+    with testapp["Session"]() as s:
+        assert _sync_jobs(s) == []

@@ -56,6 +56,8 @@ PIPELINE_BUSY_RETRY = timedelta(minutes=30)
 # A pipeline job runs this long (plus the item in hand), then goes to the
 # back of the queue, so sign-in syncs and notifications don't wait hours.
 PIPELINE_SLICE = timedelta(minutes=10)
+# A student can ask for a sync by hand ("Sync now") this often.
+MANUAL_SYNC_EVERY = timedelta(minutes=10)
 
 
 class Defer(Exception):
@@ -143,20 +145,60 @@ def sync_state(session: Session, user: User) -> str:
     Moodle key or Classroom grant to sync with), "failed" (their latest
     sync failed), "unknown" (no sync on record: never queued, or pruned
     by prune_finished), else "empty" (synced fine, nothing to show)."""
-    from app.sync_cli import has_credentials
-
-    mine = session.exec(
-        select(Job).where(Job.type == "sync",
-                          Job.payload["user_email"].as_string() == user.email)
-        .order_by(Job.updated_at.desc())
-    ).all()
+    mine = _user_syncs(session, user)
     if any(j.status in ("pending", "running") for j in mine):
         return "syncing"
-    if not any(has_credentials(source, user) for source in ("moodle", "classroom")):
+    if not _connected_sources(user):
         return "disconnected"
     if not mine:
         return "unknown"
     return "failed" if mine[0].status == "failed" else "empty"
+
+
+def _user_syncs(session: Session, user: User) -> list[Job]:
+    """The user's sync jobs still on record, latest activity first."""
+    return session.exec(
+        select(Job).where(Job.type == "sync",
+                          Job.payload["user_email"].as_string() == user.email)
+        .order_by(Job.updated_at.desc())
+    ).all()
+
+
+def _connected_sources(user: User) -> list[str]:
+    from app.sync_cli import has_credentials
+
+    return [source for source in ("moodle", "classroom") if has_credentials(source, user)]
+
+
+def request_sync(session: Session, user: User,
+                 now: datetime | None = None) -> tuple[str, timedelta | None]:
+    """A student asking for a sync of their own account now, rather than
+    waiting for the cron. Returns (outcome, wait):
+
+    - "queued": a sync of each connected source is now pending;
+    - "disconnected": no Moodle key or Classroom grant to sync with;
+    - "syncing": one is already pending or running, nothing added;
+    - "wait": their last sync was queued under MANUAL_SYNC_EVERY ago, and
+      `wait` is how long until they may ask again. Any sync counts, the
+      cron's or a sign-in's too: the courses are that fresh either way.
+    """
+    sources = _connected_sources(user)
+    if not sources:
+        return "disconnected", None
+    email = user.email  # the enqueue commits, expiring `user`
+    mine = _user_syncs(session, user)
+    if any(j.status in ("pending", "running") for j in mine):
+        return "syncing", None
+    if mine:
+        latest = max(j.created_at for j in mine)
+        if latest.tzinfo is None:  # SQLite returns naive datetimes
+            latest = latest.replace(tzinfo=timezone.utc)
+        wait = latest + MANUAL_SYNC_EVERY - (now or _utcnow())
+        if wait > timedelta(0):
+            return "wait", wait
+    for source in sources:
+        enqueue_sync_once(session, source, email)  # None: a racing click won
+    return "queued", None
 
 
 def has_chunks(session: Session, user_id, source: str) -> bool:

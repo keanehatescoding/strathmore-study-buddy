@@ -39,6 +39,41 @@ def test_browser_flow(testapp):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_counts_say_items_not_files(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    with Session() as s:
+        course = Course(user_id=testapp["user_id"], source="classroom", source_id="c1",
+                        name="CS 301")
+        s.add(course)
+        s.commit()
+        s.refresh(course)
+        topics = [Topic(course_id=course.id, source_id=f"t{i}", title=f"Topic {i}", order=i)
+                  for i in range(3)]
+        s.add_all(topics)
+        s.commit()
+        for t in topics:
+            s.refresh(t)
+        # links, pages and announcements are counted too, so not "files"
+        s.add_all([
+            Resource(topic_id=topics[0].id, source="classroom", source_id="r1",
+                     type="link", title="Lecture recording"),
+            Resource(topic_id=topics[0].id, source="classroom", source_id="r2",
+                     type="page_text", title="Week 1 announcement"),
+            Resource(topic_id=topics[1].id, source="classroom", source_id="r3",
+                     type="file", title="trees.pdf"),
+        ])
+        s.commit()
+        cid = str(course.id)
+
+    home = client.get("/").text
+    assert "3 topics · 3 items" in home and "files" not in home
+
+    page = client.get(f"/courses/{cid}").text
+    assert "2 items" in page and "1 item<" in page and "0 items" in page
+    assert "Nothing in this topic yet." in page
+    assert "files" not in page and "1 file" not in page
+
+
 def test_unowned_course_hidden(testapp):
     client, Session = testapp["client"], testapp["Session"]
     with Session() as s:

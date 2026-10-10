@@ -24,7 +24,7 @@
   <li class="course-row">
     <span class="code">{{ c.code or "" }}</span>
     <span class="grow"><a href="/courses/{{ c.id }}" class="name">{{ c.name }}</a></span>
-    <span class="counts">{{ counts[c.id|string].topics }} topics · {{ counts[c.id|string].resources }} files{% if c.source == "classroom" %} · Classroom{% endif %}</span>
+    <span class="counts">{{ counts[c.id|string].topics }} topics · {{ counts[c.id|string].resources }} item{% if counts[c.id|string].resources != 1 %}s{% endif %}{% if c.source == "classroom" %} · Classroom{% endif %}</span>
   </li>
   {% endfor %}
 </ul>

@@ -266,17 +266,22 @@ def user_owns_item(session: Session, user_id, item_id) -> bool:
     ).first() is not None
 
 
+def active_items(user_id):
+    """Scoped items up for review: those outside archived courses."""
+    return scoped_items(user_id).where(Course.archived == False)  # noqa: E712
+
+
 def _new(user_id):
-    """Scoped items this user has never answered."""
-    return scoped_items(user_id).outerjoin(
+    """Active items this user has never answered."""
+    return active_items(user_id).outerjoin(
         ReviewState,
         and_(ReviewState.quiz_item_id == QuizItem.id, ReviewState.user_id == user_id),
     ).where(ReviewState.id.is_(None))
 
 
 def _overdue(user_id, now: datetime):
-    """Scoped items whose ReviewState has come due."""
-    return scoped_items(user_id).join(
+    """Active items whose ReviewState has come due."""
+    return active_items(user_id).join(
         ReviewState,
         and_(ReviewState.quiz_item_id == QuizItem.id, ReviewState.user_id == user_id),
     ).where(ReviewState.next_review_date <= now)

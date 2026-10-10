@@ -444,7 +444,8 @@ def run_pipeline_job(session: Session, payload: dict) -> dict:
         raise ValueError(f"no such user {payload['user_email']}")
     source = payload["source"]
     course_ids = session.exec(
-        select(Course.id).where(Course.user_id == user.id, Course.source == source)
+        select(Course.id).where(Course.user_id == user.id, Course.source == source,
+                                Course.archived == False)  # noqa: E712
         .order_by(Course.id)
     ).all()
     chunk_llm, quiz_llm = llm_clients()

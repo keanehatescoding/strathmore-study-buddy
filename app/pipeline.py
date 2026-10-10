@@ -67,16 +67,20 @@ def _past(deadline: float | None, result: StageResult) -> bool:
 
 
 def _scoped(q, course_id, source):
-    """Restrict a Resource-joinable query to one course and/or source (None = all).
+    """Restrict a Resource-joinable query to one course and/or source (None = all),
+    leaving out archived courses: nobody reviews them, so they get no LLM spend.
 
     The source filter matters for extraction: a Moodle downloader must never
     see a Classroom URL, since it appends the Moodle token to whatever it fetches.
     """
     if source is not None:
         q = q.where(Resource.source == source)
+    q = (q.join(Topic, Topic.id == Resource.topic_id)
+         .join(Course, Course.id == Topic.course_id)
+         .where(Course.archived == False))  # noqa: E712
     if course_id is None:
         return q
-    return q.join(Topic, Topic.id == Resource.topic_id).where(Topic.course_id == course_id)
+    return q.where(Topic.course_id == course_id)
 
 
 MAX_CHUNK_ATTEMPTS = 3

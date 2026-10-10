@@ -351,6 +351,13 @@ small, .muted { color: var(--ink-soft); }
 .assignments .past { margin-top: 0.5rem; }
 .assignments .past summary { cursor: pointer; color: var(--ink-soft); font-size: 0.9rem; }
 
+/* Archiving a course */
+.archive-form { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.9rem; }
+.archive-form .when { color: var(--ink-soft); font-size: 0.9rem; }
+.archived { margin-top: 2.5rem; }
+.archived summary { cursor: pointer; color: var(--ink-soft); font-size: 0.9rem; }
+.archived .rows { margin-top: 0.5rem; }
+
 /* Empty states */
 
 .empty {

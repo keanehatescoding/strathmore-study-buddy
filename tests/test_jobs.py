@@ -638,6 +638,16 @@ def test_pipeline_job_runs_only_the_users_courses_of_its_source(
     assert out == {str(cid): {"chunking": {"chunks": 2}} for cid in pipeline_user}
 
 
+def test_pipeline_job_skips_archived_courses(session, pipeline_user, monkeypatch):
+    from app.models import Course
+
+    ran = _fake_pipeline(monkeypatch)
+    _set(session, session.get(Course, pipeline_user[0]), archived=True)
+    out = jobs.run_pipeline_job(session, {"source": "moodle", "user_email": "s@x.edu"})
+    assert ran == [("moodle", pipeline_user[1])]
+    assert list(out) == [str(pipeline_user[1])]
+
+
 def test_pipeline_job_stops_when_the_quota_runs_out(session, pipeline_user, monkeypatch):
     ran = _fake_pipeline(monkeypatch, quota_on=pipeline_user[0])
     out = jobs.run_pipeline_job(session, {"source": "moodle", "user_email": "s@x.edu"})

@@ -29,6 +29,11 @@
   {% endfor %}
 </ul>
 <p id="search-empty-state" class="row-empty" hidden>No courses match that filter.</p>
+{% elif archived %}
+<div class="empty">
+  <h2>All your courses are archived</h2>
+  <p>Open one below and unarchive it to study it again.</p>
+</div>
 {% else %}
 <div class="empty">
   {% if sync_state == "syncing" %}
@@ -57,5 +62,19 @@
   </p>
   {% endif %}
 </div>
+{% endif %}
+
+{% if archived %}
+<details class="archived">
+  <summary>Archived ({{ archived|length }})</summary>
+  <ul class="rows">
+    {% for c in archived %}
+    <li class="course-row">
+      <span class="code">{{ c.code or "" }}</span>
+      <span class="grow"><a href="/courses/{{ c.id }}" class="name">{{ c.name }}</a></span>
+    </li>
+    {% endfor %}
+  </ul>
+</details>
 {% endif %}
 {% endblock %}

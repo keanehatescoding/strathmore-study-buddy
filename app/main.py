@@ -395,11 +395,12 @@ def course_list(
 ):
     from app.jobs import sync_state
 
-    courses = session.exec(
+    mine = session.exec(
         select(Course)
         .where(Course.user_id == user.id)
         .order_by(Course.name)
     ).all()
+    courses = [c for c in mine if not c.archived]
     ids = [c.id for c in courses]
     n_topics = dict(session.exec(
         select(Topic.course_id, func.count())
@@ -421,9 +422,10 @@ def course_list(
         "courses.html",
         {
             "courses": courses,
+            "archived": [c for c in mine if c.archived],
             "counts": counts,
             # only needed to explain an empty list
-            "sync_state": None if courses else sync_state(session, user),
+            "sync_state": None if mine else sync_state(session, user),
             "active_page": "courses",
         },
     )
@@ -459,9 +461,45 @@ def course_detail(
             "resources_by_topic": resources_by_topic,
             "assignments": upcoming,
             "past_assignments": past,
+            "csrf_token": csrf_token(request),
             "active_page": "courses",
         },
     )
+
+
+def _set_archived(session: Session, user: User, course_id: UUID, archived: bool) -> UUID:
+    """Returns the stored course's id, so the redirect after it is built
+    from our own row rather than from the request path."""
+    course = owned_course(session, user, course_id)
+    stored_id = course.id
+    course.archived = archived
+    session.add(course)
+    session.commit()
+    return stored_id
+
+
+@app.post("/courses/{course_id}/archive")
+async def archive_course(
+    course_id: UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    await checked_form(request)
+    await run_in_threadpool(_set_archived, session, user, course_id, True)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/courses/{course_id}/unarchive")
+async def unarchive_course(
+    course_id: UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    await checked_form(request)
+    stored_id = await run_in_threadpool(_set_archived, session, user, course_id, False)
+    return RedirectResponse(f"/courses/{stored_id}", status_code=303)
 
 
 def split_assignments(assignments, zone, now: datetime | None = None):

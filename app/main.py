@@ -467,11 +467,15 @@ def course_detail(
     )
 
 
-def _set_archived(session: Session, user: User, course_id: UUID, archived: bool) -> None:
+def _set_archived(session: Session, user: User, course_id: UUID, archived: bool) -> UUID:
+    """Returns the stored course's id, so the redirect after it is built
+    from our own row rather than from the request path."""
     course = owned_course(session, user, course_id)
+    stored_id = course.id
     course.archived = archived
     session.add(course)
     session.commit()
+    return stored_id
 
 
 @app.post("/courses/{course_id}/archive")
@@ -494,8 +498,8 @@ async def unarchive_course(
     user: User = Depends(current_user),
 ):
     await checked_form(request)
-    await run_in_threadpool(_set_archived, session, user, course_id, False)
-    return RedirectResponse(f"/courses/{course_id}", status_code=303)
+    stored_id = await run_in_threadpool(_set_archived, session, user, course_id, False)
+    return RedirectResponse(f"/courses/{stored_id}", status_code=303)
 
 
 def split_assignments(assignments, zone, now: datetime | None = None):

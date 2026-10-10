@@ -4,7 +4,7 @@
 {% block body %}
 <div class="quiz">
   <div class="quiz-status">
-    <span>{{ remaining }} more due after this one · <a href="/review">queue</a></span>
+    <span>{{ remaining }} more due{% if review_course %} in {{ review_course.name }}{% endif %} after this one · <a href="/review{{ scope }}">queue</a></span>
     {% if not result and item.question_type == "mcq" %}
     <span class="kbd-hint">Press <kbd>1</kbd>–<kbd>{{ item.options|length }}</kbd> to choose, <kbd>Enter</kbd> to submit</span>
     {% elif result %}
@@ -59,14 +59,14 @@
   {% endif %}
 
   <div class="actions">
-    <a id="next-question-btn" href="/review/take" class="btn btn-primary">Next question</a>
+    <a id="next-question-btn" href="/review/take{{ scope }}" class="btn btn-primary">Next question</a>
   </div>
 
   {% else %}
   {% if error %}
   <div class="notice notice-error" role="alert">{{ error }}</div>
   {% endif %}
-  <form method="post" action="/review/{{ item.id }}/answer" class="answer-form">
+  <form method="post" action="/review/{{ item.id }}/answer{{ scope }}" class="answer-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
     {% if item.question_type == "mcq" %}
@@ -88,17 +88,17 @@
       <button type="submit" class="btn btn-primary">Submit</button>
       {# posts the skip form below: forms can't nest #}
       <button type="submit" form="skip-form" class="btn" formnovalidate>Skip for now</button>
-      <a href="/review">Back to queue</a>
+      <a href="/review{{ scope }}">Back to queue</a>
     </div>
   </form>
-  <form id="skip-form" method="post" action="/review/{{ item.id }}/skip">
+  <form id="skip-form" method="post" action="/review/{{ item.id }}/skip{{ scope }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   </form>
   {% endif %}
 
   <details class="report">
     <summary>Something wrong with this question?</summary>
-    <form method="post" action="/review/{{ item.id }}/suspend" class="report-form">
+    <form method="post" action="/review/{{ item.id }}/suspend{{ scope }}" class="report-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <p class="section-note">Suspending takes it out of your reviews. You can bring it back from the queue page.</p>
       <label for="suspend-reason">What's wrong?</label>

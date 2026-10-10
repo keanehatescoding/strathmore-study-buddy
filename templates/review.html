@@ -4,15 +4,22 @@
 {% block body %}
 {% if items %}
 {# due_count is missing when the nav lookup fails; the queue is still a lower bound #}
+{% if review_course %}
+{% set due = course_due %}
+{% else %}
 {% set due = due_count if due_count is defined else items|length %}
+{% endif %}
 <div class="due-strip">
-  <p><strong>{{ due }}</strong> question{% if due != 1 %}s{% endif %} due</p>
-  <a href="/review/take" class="btn btn-primary">Start review</a>
+  <p><strong>{{ due }}</strong> question{% if due != 1 %}s{% endif %} due{% if review_course %} in {{ review_course.name }}{% endif %}</p>
+  <a href="/review/take{{ scope }}" class="btn btn-primary">Start review</a>
 </div>
 
 <div class="section-head">
   <h1 class="flush">Review queue</h1>
 </div>
+{% if review_course %}
+<p class="section-note">Only <a href="/courses/{{ review_course.id }}">{{ review_course.name }}</a>. <a href="/review">Review every course</a></p>
+{% endif %}
 {% if due > items|length %}
 <p class="section-note">Showing the next {{ items|length }} of {{ due }}. The rest come up as you work through these.</p>
 {% endif %}
@@ -28,6 +35,16 @@
   {% endfor %}
 </ul>
 
+{% elif review_course %}
+<div class="empty">
+  <h1>Nothing due in {{ review_course.name }}</h1>
+  {% if review_course.archived %}
+  <p>This course is archived, so it's left out of your reviews.</p>
+  {% else %}
+  <p>You're caught up on this course. New reviews fall due at midnight.</p>
+  {% endif %}
+  <p class="actions"><a href="/review">Review every course</a> <a href="/courses/{{ review_course.id }}">Back to the course</a></p>
+</div>
 {% else %}
 <div class="empty">
   <h1>Nothing due</h1>

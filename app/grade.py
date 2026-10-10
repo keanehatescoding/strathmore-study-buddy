@@ -280,28 +280,30 @@ def user_owns_item(session: Session, user_id, item_id) -> bool:
     ).first() is not None
 
 
-def active_items(user_id, *entities):
+def active_items(user_id, *entities, course_id=None):
     """Scoped items up for review: those outside archived courses that the
-    user hasn't suspended. Joins the user's ItemFlag, when there is one."""
-    return (
+    user hasn't suspended, in one course when `course_id` is given. Joins the
+    user's ItemFlag, when there is one."""
+    query = (
         scoped_items(user_id, *entities)
         .outerjoin(ItemFlag, and_(ItemFlag.quiz_item_id == QuizItem.id,
                                   ItemFlag.user_id == user_id))
         .where(Course.archived == False, ItemFlag.suspended_at.is_(None))  # noqa: E712
     )
+    return query if course_id is None else query.where(Course.id == course_id)
 
 
-def _new(user_id):
+def _new(user_id, course_id=None):
     """Active items this user has never answered."""
-    return active_items(user_id).outerjoin(
+    return active_items(user_id, course_id=course_id).outerjoin(
         ReviewState,
         and_(ReviewState.quiz_item_id == QuizItem.id, ReviewState.user_id == user_id),
     ).where(ReviewState.id.is_(None))
 
 
-def _overdue(user_id, now: datetime):
+def _overdue(user_id, now: datetime, course_id=None):
     """Active items whose ReviewState has come due."""
-    return active_items(user_id).join(
+    return active_items(user_id, course_id=course_id).join(
         ReviewState,
         and_(ReviewState.quiz_item_id == QuizItem.id, ReviewState.user_id == user_id),
     ).where(ReviewState.next_review_date <= now)
@@ -318,15 +320,16 @@ def _new_allowance(session: Session, user_id, now: datetime) -> int:
     return max(0, NEW_ITEMS_PER_DAY - started)
 
 
-def due_items(session: Session, user_id, limit: int = 20) -> list[QuizItem]:
+def due_items(session: Session, user_id, limit: int = 20, course_id=None) -> list[QuizItem]:
     """Review queue: most-overdue reviews first, then new items up to the
     daily cap, so a backlog of new items can't starve reviews. Items skipped
-    today come last, in the order they were skipped."""
+    today come last, in the order they were skipped. `course_id` narrows the
+    queue to one course; the daily cap stays the user's, across courses."""
     now = datetime.now(timezone.utc)
     day_start = local_day_start(now, user_zone(session, user_id))
     unskipped = or_(ItemFlag.skipped_at.is_(None), ItemFlag.skipped_at < day_start)
     items = list(session.exec(
-        _overdue(user_id, now)
+        _overdue(user_id, now, course_id)
         .where(unskipped)
         .order_by(ReviewState.next_review_date, Topic.order, Chunk.order,
                   QuizItem.generation_key)
@@ -336,7 +339,7 @@ def due_items(session: Session, user_id, limit: int = 20) -> list[QuizItem]:
     room = min(limit - len(items), allowance)
     if room > 0:
         fresh = session.exec(
-            _new(user_id)
+            _new(user_id, course_id)
             .where(unskipped)
             .order_by(Topic.order, Chunk.order, QuizItem.generation_key)
             .limit(room)
@@ -345,7 +348,7 @@ def due_items(session: Session, user_id, limit: int = 20) -> list[QuizItem]:
         allowance -= len(fresh)
     if len(items) < limit:
         skipped = session.exec(
-            active_items(user_id, QuizItem, ReviewState.id)
+            active_items(user_id, QuizItem, ReviewState.id, course_id=course_id)
             .outerjoin(ReviewState, and_(ReviewState.quiz_item_id == QuizItem.id,
                                          ReviewState.user_id == user_id))
             .where(ItemFlag.skipped_at >= day_start,
@@ -363,12 +366,14 @@ def due_items(session: Session, user_id, limit: int = 20) -> list[QuizItem]:
     return items
 
 
-def due_count(session: Session, user_id) -> int:
+def due_count(session: Session, user_id, course_id=None) -> int:
     now = datetime.now(timezone.utc)
     overdue = session.exec(
-        _overdue(user_id, now).with_only_columns(func.count(QuizItem.id))
+        _overdue(user_id, now, course_id).with_only_columns(func.count(QuizItem.id))
     ).one()
-    new = session.exec(_new(user_id).with_only_columns(func.count(QuizItem.id))).one()
+    new = session.exec(
+        _new(user_id, course_id).with_only_columns(func.count(QuizItem.id))
+    ).one()
     return overdue + min(new, _new_allowance(session, user_id, now))
 
 

@@ -889,3 +889,177 @@ def test_purging_a_resource_drops_its_flags(testapp):
         _purge_derived(s, s.exec(select(Resource)).one().id)
         s.commit()
         assert s.exec(select(ItemFlag)).all() == []
+
+
+def _two_courses(testapp) -> tuple[str, str, str]:
+    """Course "C" with the new item "Which?" and course "Queue" with two
+    overdue items. Returns (C's id, Queue's id, "Which?"'s id)."""
+    item_id = _seed(testapp["Session"])
+    c = _course_id(testapp["Session"])
+    return c, _seed_overdue(testapp, 2), item_id
+
+
+def test_review_one_course_stays_in_that_course(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    c, queue, _ = _two_courses(testapp)
+    ids = _item_ids(Session)
+
+    page = client.get(f"/review?course={queue}").text
+    assert "<strong>2</strong> questions due in Queue" in page
+    assert "Q0?" in page and "Q1?" in page and "Which?" not in page
+    assert f'href="/review/take?course={queue}"' in page
+    # the nav badge still counts every course
+    assert '<span class="nav-count">3</span>' in page
+    page = client.get(f"/review?course={c}").text
+    assert "<strong>1</strong> question due in C" in page
+    assert "Which?" in page and "Q0?" not in page
+
+    take = client.get(f"/review/take?course={queue}").text
+    assert '<h1 class="quiz-question">Q0?</h1>' in take
+    assert "1 more due in Queue after this one" in take
+    assert f'href="/review?course={queue}"' in take
+    for action in ("answer", "skip", "suspend"):
+        assert f'action="/review/{ids["Q0?"]}/{action}?course={queue}"' in take
+
+    token = _token(client)
+    r = client.post(f"/review/{ids['Q0?']}/answer?course={queue}",
+                    data={"answer": "0", "csrf_token": token}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/review/{ids['Q0?']}/result?course={queue}"
+    result = client.get(r.headers["location"]).text
+    assert "1 more due in Queue after this one" in result  # Q1
+    assert f'id="next-question-btn" href="/review/take?course={queue}"' in result
+
+    r = client.post(f"/review/{ids['Q1?']}/skip?course={queue}",
+                    data={"csrf_token": token}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/review/take?course={queue}"
+    r = client.post(f"/review/{ids['Q1?']}/suspend?course={queue}",
+                    data={"csrf_token": token, "reason": "unclear"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/review/take?course={queue}"
+
+    # the course is done while another still has a question due
+    done = client.get(r.headers["location"]).text
+    assert "Nothing due in Queue" in done and 'href="/review"' in done
+    assert "Which?" not in done
+    assert '<h1 class="quiz-question">Which?</h1>' in client.get("/review/take").text
+
+
+def test_course_queue_and_count_helpers(testapp):
+    c, queue, _ = _two_courses(testapp)
+    uid = testapp["user_id"]
+    with testapp["Session"]() as s:
+        assert [i.question for i in due_items(s, uid, course_id=uuid.UUID(queue))] \
+            == ["Q0?", "Q1?"]
+        assert [i.question for i in due_items(s, uid, course_id=uuid.UUID(c))] == ["Which?"]
+        assert due_count(s, uid, uuid.UUID(queue)) == 2
+        assert due_count(s, uid, uuid.UUID(c)) == 1
+        assert due_count(s, uid) == 3 and len(due_items(s, uid)) == 3
+
+
+def test_course_review_keeps_the_daily_new_item_cap(testapp, monkeypatch):
+    """The cap is the user's: a new item answered in one course spends the
+    slot a single-course review of another would have used."""
+    client, Session = testapp["client"], testapp["Session"]
+    c, _, item_id = _two_courses(testapp)
+    with Session() as s:  # a second course with a new item
+        other = Course(user_id=testapp["user_id"], source="moodle", source_id="c3", name="D")
+        s.add(other)
+        s.commit()
+        topic = Topic(course_id=other.id, source_id="t3", title="T")
+        s.add(topic)
+        s.commit()
+        res = Resource(topic_id=topic.id, source="moodle", source_id="r3", type="file",
+                       title="R", status="extracted", extracted_text="t")
+        s.add(res)
+        s.commit()
+        chunk = Chunk(resource_id=res.id, title="Ch", content="t", order=0)
+        s.add(chunk)
+        s.commit()
+        s.add(QuizItem(chunk_id=chunk.id, question="Other?", question_type="mcq",
+                       options=["a", "b"], correct_answer="0", generation_key="g3"))
+        s.commit()
+        d = other.id
+    monkeypatch.setattr("app.grade.NEW_ITEMS_PER_DAY", 1)
+    uid = testapp["user_id"]
+    with Session() as s:
+        assert [i.question for i in due_items(s, uid, course_id=d)] == ["Other?"]
+        assert due_count(s, uid, d) == 1
+    client.post(f"/review/{item_id}/answer?course={c}",
+                data={"answer": "1", "csrf_token": _token(client)})
+    with Session() as s:
+        assert due_items(s, uid, course_id=d) == []
+        assert due_count(s, uid, d) == 0
+    assert "Nothing due in D" in client.get(f"/review/take?course={d}").text
+
+
+def test_course_review_skipped_item_goes_last_within_the_course(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    _, queue, _ = _two_courses(testapp)
+    ids = _item_ids(Session)
+    client.post(f"/review/{ids['Q0?']}/skip?course={queue}",
+                data={"csrf_token": _token(client)})
+    with Session() as s:
+        assert [i.question for i in due_items(s, testapp["user_id"],
+                                              course_id=uuid.UUID(queue))] == ["Q1?", "Q0?"]
+
+
+@pytest.mark.parametrize("path", ["/review", "/review/take"])
+def test_course_review_needs_the_users_own_course(testapp, path):
+    client, Session = testapp["client"], testapp["Session"]
+    _seed(Session)
+    _other_users_item(Session)
+    with Session() as s:
+        theirs = s.exec(select(Course).where(Course.name == "Theirs")).one().id
+    assert client.get(f"{path}?course={theirs}").status_code == 404
+    assert client.get(f"{path}?course={uuid.uuid4()}").status_code == 404
+    assert client.get(f"{path}?course=nope").status_code == 400
+
+
+@pytest.mark.parametrize("action", ["answer", "skip", "suspend"])
+def test_course_review_posts_refuse_a_foreign_course(testapp, action):
+    client, Session = testapp["client"], testapp["Session"]
+    item_id = _seed(Session)
+    _other_users_item(Session)
+    with Session() as s:
+        theirs = s.exec(select(Course).where(Course.name == "Theirs")).one().id
+    r = client.post(f"/review/{item_id}/{action}?course={theirs}",
+                    data={"answer": "1", "reason": "other", "csrf_token": _token(client)},
+                    follow_redirects=False)
+    assert r.status_code == 404
+    with Session() as s:  # nothing was recorded
+        assert s.exec(select(ReviewState)).all() == []
+        assert s.exec(select(ItemFlag)).all() == []
+
+
+def test_result_without_a_result_returns_to_the_course_review(testapp):
+    client = testapp["client"]
+    c, _, item_id = _two_courses(testapp)
+    r = client.get(f"/review/{item_id}/result?course={c}", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/review/take?course={c}"
+
+
+def test_rejected_answer_keeps_the_course_review(testapp):
+    client = testapp["client"]
+    c, _, item_id = _two_courses(testapp)
+    r = client.post(f"/review/{item_id}/answer?course={c}",
+                    data={"answer": "9", "csrf_token": _token(client)})
+    assert r.status_code == 400
+    assert f'action="/review/{item_id}/answer?course={c}"' in r.text
+
+
+def test_course_page_links_to_its_review(testapp):
+    client = testapp["client"]
+    c, queue, item_id = _two_courses(testapp)
+    page = client.get(f"/courses/{queue}").text
+    assert "<strong>2</strong> questions due in this course" in page
+    assert f'href="/review/take?course={queue}"' in page
+    assert "<strong>1</strong> question due in this course" in client.get(f"/courses/{c}").text
+
+    token = _token(client)
+    client.post(f"/review/{item_id}/answer", data={"answer": "1", "csrf_token": token})
+    assert "due in this course" not in client.get(f"/courses/{c}").text  # nothing due
+
+    client.post(f"/courses/{queue}/archive", data={"csrf_token": token})
+    assert "due in this course" not in client.get(f"/courses/{queue}").text
+    page = client.get(f"/review?course={queue}").text
+    assert "Nothing due in Queue" in page and "This course is archived" in page

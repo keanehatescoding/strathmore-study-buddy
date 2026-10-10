@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 from itsdangerous import BadSignature, URLSafeSerializer
+from sqlalchemy import text
 from sqlmodel import Session, func, select
 
 from app.grade import _aware, due_count
@@ -144,9 +145,10 @@ def send_batch(api_key: str, emails: list[dict], idempotency_key: str,
 def enqueue_new_material(session: Session, course_id, new_items: int) -> NotificationEvent | None:
     """One batched event per course, owned by the course owner.
 
-    Adds to the course's queued event when it has never been tried (an
-    attempted one may already have been delivered with its old count), so
-    each slice of a long pipeline job doesn't queue another email.
+    Adds to the course's queued event when it has never been tried and
+    hasn't expired, so each slice of a long pipeline job doesn't queue
+    another email. send_pending counts an attempt before it renders, so an
+    event it is delivering is never merged into after its email was made.
 
     Returns None when nothing is new or the course has no owner: there is
     nobody to tell, and guessing a recipient would misattribute the course.
@@ -159,6 +161,7 @@ def enqueue_new_material(session: Session, course_id, new_items: int) -> Notific
     owner = session.get(User, course.user_id)
     if owner is None or not owner.notify_email:
         return None
+    _lock_new_material(session, course.user_id)
     queued = session.exec(
         select(NotificationEvent).where(
             NotificationEvent.user_id == course.user_id,
@@ -169,7 +172,8 @@ def enqueue_new_material(session: Session, course_id, new_items: int) -> Notific
             NotificationEvent.attempts == 0,
         ).order_by(NotificationEvent.created_at).with_for_update()
     ).all()
-    event = next((e for e in queued if e.payload.get("course_id") == str(course.id)), None)
+    event = next((e for e in queued if e.payload.get("course_id") == str(course.id)
+                  and not _expired(e)), None)
     if event is None:
         event = NotificationEvent(user_id=course.user_id, type="new_material")
     else:
@@ -181,6 +185,24 @@ def enqueue_new_material(session: Session, course_id, new_items: int) -> Notific
     session.commit()
     session.refresh(event)
     return event
+
+
+def _lock_new_material(session: Session, user_id) -> None:
+    """Serialize enqueue_new_material per user until commit: FOR UPDATE can't
+    lock an event that doesn't exist yet, so two racing first enqueues would
+    each insert one. SQLite has no concurrent writers to guard against."""
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    from app.pipeline import _lock_key
+
+    session.exec(text("SELECT pg_advisory_xact_lock(:k)").bindparams(
+        k=_lock_key(f"app.notify.new_material:{user_id}")))
+
+
+def _expired(event: NotificationEvent) -> bool:
+    """Unsent new-material news older than NEW_MATERIAL_MAX_AGE is old news."""
+    return event.type == "new_material" and (
+        _aware(event.created_at) < datetime.now(timezone.utc) - NEW_MATERIAL_MAX_AGE)
 
 
 def check_review_due(
@@ -313,10 +335,6 @@ def opt_out(session: Session, user: User) -> None:
 
 def _undeliverable(session: Session, event: NotificationEvent) -> str | None:
     """Why the owner shouldn't get this event any more, else None."""
-    if event.type == "new_material" and (
-        _aware(event.created_at) < datetime.now(timezone.utc) - NEW_MATERIAL_MAX_AGE
-    ):
-        return "expired"
     user = session.get(User, event.user_id) if event.user_id is not None else None
     if user is None:
         return None  # recipient_for decides (fallback address)
@@ -330,8 +348,7 @@ def _undeliverable(session: Session, event: NotificationEvent) -> str | None:
 
 
 # Reasons that will never change on retry: the event is marked failed, not requeued.
-PERMANENT_FAILURES = {"no_recipient", "unknown_event_type", "opted_out", "inactive",
-                      "expired"}
+PERMANENT_FAILURES = {"no_recipient", "unknown_event_type", "opted_out", "inactive"}
 GAVE_UP = "gave_up"  # failed_reason after MAX_SEND_ATTEMPTS failed deliveries
 
 
@@ -352,9 +369,11 @@ def send_pending(
     outlasts the retries stops the run so the rest wait for the next pass.
     `errors` counts failures by EmailError.reason for the job result.
     Events that can never go out (PERMANENT_FAILURES) get failed_reason and
-    leave the queue; any other failure counts an attempt, and the
-    MAX_SEND_ATTEMPTS-th leaves it as GAVE_UP. A rate limit isn't the
-    event's fault and costs no attempt.
+    leave the queue, as do expired new_material events (even without an
+    API key). Each pass counts an attempt on every event before rendering
+    it, which also claims it from enqueue_new_material's merging; a failed
+    MAX_SEND_ATTEMPTS-th attempt leaves it as GAVE_UP. A rate limit isn't
+    the event's fault and gives its attempt back.
 
     Duplicate safety: a multi-email batch gets a batch_key, committed before
     the request, so a failure that might have been delivered (network, 5xx,
@@ -376,10 +395,27 @@ def send_pending(
         .where(NotificationEvent.sent == False,  # noqa: E712
                NotificationEvent.failed_reason == None)  # noqa: E711
         .order_by(NotificationEvent.created_at)
+        # waits out an enqueue_new_material merging into one of these, and
+        # reads the merged payload
+        .with_for_update().execution_options(populate_existing=True)
     ).all()
+    live = []
+    for event in events:
+        if _expired(event):
+            event.failed_reason = "expired"
+            errors["expired"] += 1
+            session.add(event)
+        else:
+            live.append(event)
     if not api_key:  # nothing can be delivered; don't fake-mark or split batches
-        errors["no_api_key"] = len(events)
+        session.commit()
+        errors["no_api_key"] += len(live)
         return _result(sent, errors)
+    events = live
+    for event in events:  # claim: enqueue_new_material merges only untried events
+        event.attempts += 1
+        session.add(event)
+    session.commit()
     keyed: dict[str, list] = {}  # batch_key -> earlier batch, resent unchanged
     fresh: list = []
     if base_url is None:
@@ -421,6 +457,10 @@ def send_pending(
             sent += len(batch)
         except RateLimitedError as e:
             errors[e.reason] += len(batch) + sum(len(b) for b in pending)
+            for event, _ in [*batch, *(item for b in pending for item in b)]:
+                event.attempts -= 1  # not delivered, and not the event's fault
+                session.add(event)
+            session.commit()
             break
         except EmailError as e:
             if len(batch) > 1 and e.reason == BATCH_REJECTED:
@@ -433,16 +473,15 @@ def send_pending(
                 pending[:0] = [[one] for one in batch]
             else:
                 errors[e.reason] += len(batch)
-                _count_attempt(session, batch)
+                _give_up_spent(session, batch)
     return _result(sent, errors)
 
 
-def _count_attempt(session: Session, batch) -> None:
+def _give_up_spent(session: Session, batch) -> None:
     for event, _ in batch:
-        event.attempts += 1
         if event.attempts >= MAX_SEND_ATTEMPTS:
             event.failed_reason = GAVE_UP
-        session.add(event)
+            session.add(event)
     session.commit()
 
 

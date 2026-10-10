@@ -343,6 +343,50 @@ def test_rate_limit_stops_run_and_leaves_rest_queued(session, monkeypatch):
     assert not any(e.sent for e in session.exec(select(NotificationEvent)))
 
 
+def test_items_added_during_delivery_get_their_own_event(session, monkeypatch):
+    """A merge while the email is in flight must not land on an event about
+    to be marked sent, where its items would never be mailed."""
+    _, course = _course_with_items(session)
+    first = notify.enqueue_new_material(session, course.id, 5)
+    added = []
+
+    def slice_finishes_mid_send(emails):
+        added.append(notify.enqueue_new_material(session, course.id, 3))
+
+    calls = _fake_batches(monkeypatch, slice_finishes_mid_send)
+    assert notify.send_pending(session, "key", "from@x")["sent"] == 1
+    assert "5 new quiz items" in calls[0][0]["text"]
+    [later] = added
+    assert later.id != first.id and later.payload["new_items"] == 3
+    assert later.sent is False  # mailed on the next pass
+    calls = _fake_batches(monkeypatch)
+    notify.send_pending(session, "key", "from@x")
+    assert "3 new quiz items" in calls[0][0]["text"]
+
+
+def test_expired_event_is_not_merged_into(session):
+    _, course = _course_with_items(session)
+    old = notify.enqueue_new_material(session, course.id, 4)
+    old.created_at = datetime.now(timezone.utc) - notify.NEW_MATERIAL_MAX_AGE - timedelta(hours=1)
+    session.add(old)
+    session.commit()
+    fresh = notify.enqueue_new_material(session, course.id, 2)
+    assert fresh.id != old.id and fresh.payload["new_items"] == 2
+    assert old.payload["new_items"] == 4
+
+
+def test_old_new_material_expires_without_api_key(session):
+    _, course = _course_with_items(session)
+    old = notify.enqueue_new_material(session, course.id, 4)
+    old.created_at = datetime.now(timezone.utc) - notify.NEW_MATERIAL_MAX_AGE - timedelta(hours=1)
+    session.add(old)
+    session.commit()
+    _owned_events(session, 1)
+    assert notify.send_pending(session, "", "from@x") == {
+        "sent": 0, "failed": 2, "errors": {"expired": 1, "no_api_key": 1}}
+    assert old.failed_reason == "expired"
+
+
 def test_failing_event_gives_up_after_max_attempts(session, monkeypatch):
     def bad_key(emails):
         raise notify.EmailError("resend returned http_401", "http_401")
@@ -819,3 +863,37 @@ def test_unsubscribe_fails_queued_events(testapp):
     url = f"/unsubscribe/{notify.unsubscribe_token(testapp['user_id'])}"
     assert TestClient(app).post(url).status_code == 200
     assert _failed_reasons(testapp) == ["opted_out"]
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="advisory locks are Postgres-only")
+def test_racing_first_enqueues_make_one_event():
+    import threading
+
+    engine = make_engine()
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        _, course = _course_with_items(s)
+        course_id = course.id
+    holder = Session(engine)
+    # a first enqueue that holds the per-user lock and hasn't committed yet
+    owner = holder.get(Course, course_id).user_id
+    notify._lock_new_material(holder, owner)
+    holder.add(NotificationEvent(user_id=owner, type="new_material", payload={
+        "course": "Data Structures", "code": "CS 301",
+        "course_id": str(course_id), "new_items": 5}))
+    holder.flush()
+
+    def racer():
+        with Session(engine) as s:
+            notify.enqueue_new_material(s, course_id, 3)
+
+    t = threading.Thread(target=racer)
+    t.start()
+    t.join(0.5)
+    assert t.is_alive()  # waits on the lock instead of inserting its own
+    holder.commit()
+    holder.close()
+    t.join(10)
+    with Session(engine) as s:
+        [event] = s.exec(select(NotificationEvent)).all()
+        assert event.payload["new_items"] == 8

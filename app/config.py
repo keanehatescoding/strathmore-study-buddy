@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     dev: bool = False  # local development: allows the public default SECRET_KEY
     # comma-separated addresses and/or "@domain" entries; empty = any Google account
     allowed_emails: str = "@strathmore.edu"
-    healthcheck_ping_url: str = ""  # e.g. healthchecks.io; the worker pings it every pass
+    # e.g. healthchecks.io; the worker pings it every pass, and every 5 min of a long one
+    healthcheck_ping_url: str = ""
     job_retention_days: int = 30  # finished (completed/failed) jobs older than this are pruned
     timezone: str = "Africa/Nairobi"  # IANA zone whose midnight starts a study day
 

@@ -194,7 +194,8 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   guess another student's password. Like the POST limit, it is per-process.
 - Cron observability: set `HEALTHCHECK_PING_URL` (e.g. a healthchecks.io
   check) — the worker pings it after every pass (every minute with
-  `--loop 60`, so a period of a few minutes works), and pings `<url>/fail`
+  `--loop 60`) and every 5 minutes while a long pass is still draining a
+  backlog, so a period of 15 minutes or so works, and pings `<url>/fail`
   when a job failed for good or the pass itself crashed, so a 6am failure
   pages you instead of showing up as missing quizzes. With `--loop`, a
   crashed pass (e.g. Postgres restarting) is logged and retried next

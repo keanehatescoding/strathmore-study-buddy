@@ -414,6 +414,84 @@ def test_worker_pings_fail_when_the_pass_crashes(worker_engine, monkeypatch):
     assert pings == [True]
 
 
+def _backlog(worker_engine, monkeypatch, slices: int) -> list:
+    """Queue a pipeline job that hands itself back `slices - 1` times, like a
+    long backlog. Its first slice ages the notify job by two hours."""
+    order: list = []
+
+    def pipeline(s, payload):
+        order.append("slice")
+        if order.count("slice") == 1:
+            for job in s.exec(select(Job).where(Job.type == "send_notifications")).all():
+                job.created_at = datetime.now(timezone.utc) - timedelta(hours=2)
+                s.add(job)
+            s.commit()
+        if order.count("slice") < slices:
+            raise jobs.Defer(timedelta(0), "more to do")
+
+    monkeypatch.setitem(HANDLERS, "pipeline", pipeline)
+    monkeypatch.setitem(
+        HANDLERS, "send_notifications", lambda s, p: order.append("notify")
+    )
+    with Session(worker_engine) as s:
+        enqueue(s, "pipeline", {})
+    return order
+
+
+@pytest.mark.parametrize("notify_every", [None, timedelta(hours=1)])
+def test_long_drain_queues_notify_again_when_due(worker_engine, monkeypatch, notify_every):
+    order = _backlog(worker_engine, monkeypatch, slices=12)
+    worker.run_once(notify_every)
+    assert order.count("slice") == 12
+    # one at the start, one when it fell due mid-drain: not one per batch
+    assert order.count("notify") == 2
+    assert order.index("notify") < 5 and order[-1] == "slice"
+
+
+def test_drain_does_not_requeue_a_recent_notify(worker_engine, monkeypatch):
+    order: list = []
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: order.append("fake"))
+    monkeypatch.setitem(
+        HANDLERS, "send_notifications", lambda s, p: order.append("notify")
+    )
+    with Session(worker_engine) as s:
+        for _ in range(12):
+            enqueue(s, "fake", {})
+    worker.run_once()  # every pass: still one notify job, not one per batch
+    assert order.count("notify") == 1
+
+
+def test_long_drain_pings_between_batches(worker_engine, monkeypatch):
+    pings: list = []
+    monkeypatch.setattr(worker, "ping_healthcheck", lambda fail=False: pings.append(fail))
+    monkeypatch.setattr(worker, "PING_EVERY", timedelta(0))
+    monkeypatch.setitem(HANDLERS, "send_notifications", lambda s, p: None)
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: None)
+    monkeypatch.setitem(HANDLERS, "bad", lambda s, p: 1 / 0)
+    with Session(worker_engine) as s:
+        for _ in range(5):  # the first batch
+            enqueue(s, "fake", {})
+        enqueue(s, "bad", {}, max_attempts=1)
+        for _ in range(5):
+            enqueue(s, "fake", {})
+    assert worker.run_once()["completed"] == 11
+    # healthy after batch one; the failure in batch two is reported at once
+    # and not papered over by a later "alive" ping
+    assert pings == [False, True, True, True]
+
+
+def test_short_pass_pings_once(worker_engine, monkeypatch):
+    pings: list = []
+    monkeypatch.setattr(worker, "ping_healthcheck", lambda fail=False: pings.append(fail))
+    monkeypatch.setitem(HANDLERS, "send_notifications", lambda s, p: None)
+    monkeypatch.setitem(HANDLERS, "fake", lambda s, p: None)
+    with Session(worker_engine) as s:
+        for _ in range(12):
+            enqueue(s, "fake", {})
+    worker.run_once()
+    assert pings == [False]  # batches seconds apart don't each ping
+
+
 class _InstantStop(type(jobs.STOP)):
     def wait(self, timeout=None):  # don't really sleep between passes
         return self.is_set()

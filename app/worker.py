@@ -5,7 +5,9 @@ One pass = reap orphaned jobs, prune old finished ones, enqueue a
 send_notifications job (unless one is already queued, or --notify-every
 says the last one is too recent), then run due jobs until none are left.
 Due syncs are claimed before the notify job, so their new-material events
-go out in the same pass.
+go out in the same pass. A long drain (a pipeline backlog can take hours)
+queues another notify job whenever one falls due and keeps pinging the
+healthcheck, so neither waits for the queue to empty.
 Schedule with cron (daily) or run --loop for a persistent worker: a short
 --loop (60) picks up a sync queued at sign-in within a minute, while
 --notify-every (default 3600 with --loop) keeps the notify scan over all
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +36,11 @@ from app.jobs import Shutdown, enqueue, prune_finished, reap_stale, run_due
 from app.models import Job
 
 log = logging.getLogger("app.worker")
+
+# Within one drain: how often a still-busy worker pings the healthcheck, and
+# how often a pass without --notify-every queues another notify job.
+PING_EVERY = timedelta(minutes=5)
+DRAIN_NOTIFY_EVERY = timedelta(hours=1)
 
 
 def ping_healthcheck(fail: bool = False) -> None:
@@ -65,6 +73,13 @@ def _notify_due(session: Session, every: timedelta | None) -> bool:
     return datetime.now(timezone.utc) - last >= every
 
 
+def _queue_notify(session: Session) -> None:
+    try:
+        enqueue(session, "send_notifications", max_attempts=1)
+    except IntegrityError:  # uq_jobs_active_notify: one is already queued
+        session.rollback()
+
+
 def _drain(notify_every: timedelta | None = None) -> dict:
     totals: dict = {"completed": 0, "failed": 0, "retried": 0}
     with Session(engine) as session:
@@ -76,16 +91,21 @@ def _drain(notify_every: timedelta | None = None) -> dict:
         if pruned:
             totals["pruned"] = pruned
         if _notify_due(session, notify_every):
-            try:
-                enqueue(session, "send_notifications", max_attempts=1)
-            except IntegrityError:  # uq_jobs_active_notify: one is already queued
-                session.rollback()
+            _queue_notify(session)
+        pinged = time.monotonic()
         while not jobs.STOP.is_set():  # drain; failed jobs back off, so this terminates
             batch = run_due(session)
             for key, n in batch.items():
                 totals[key] = totals.get(key, 0) + n
             if not any(batch.values()):
                 break
+            # Still busy: don't make the notify job or the monitor wait for
+            # the whole backlog.
+            if _notify_due(session, notify_every or DRAIN_NOTIFY_EVERY):
+                _queue_notify(session)
+            if time.monotonic() - pinged >= PING_EVERY.total_seconds():
+                ping_healthcheck(fail=totals["failed"] > 0)
+                pinged = time.monotonic()
     return totals
 
 

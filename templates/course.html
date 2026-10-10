@@ -46,7 +46,7 @@
 <section class="topic">
   <div class="section-head">
     <h2>{{ t.title }}</h2>
-    <span class="aside">{{ resources_by_topic[t.id|string]|length }} file{% if resources_by_topic[t.id|string]|length != 1 %}s{% endif %}</span>
+    <span class="aside">{{ resources_by_topic[t.id|string]|length }} item{% if resources_by_topic[t.id|string]|length != 1 %}s{% endif %}</span>
   </div>
   <ul class="rows">
     {% for r in resources_by_topic[t.id|string] %}
@@ -58,7 +58,7 @@
       </span>
     </li>
     {% else %}
-    <li class="row-empty">No files in this topic.</li>
+    <li class="row-empty">Nothing in this topic yet.</li>
     {% endfor %}
   </ul>
 </section>

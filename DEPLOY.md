@@ -55,7 +55,9 @@
    notification pass, so the nightly sync's new material goes out right
    away rather than at the persistent worker's next hourly pass. Events are
    marked once sent, so the extra pass never emails anyone twice.
-   Signing in with Google also queues a Classroom sync for that user. Users
+   Signing in with Google also queues a Classroom sync for that user, and
+   the Courses page's "Sync now" button queues one per connected source (at
+   most once per 10 minutes per user, counting the cron's syncs too). Users
    who signed in before Drive access was requested must sign in once more;
    until then their Drive files stay pending. Likewise, Classroom
    announcements need `classroom.announcements.readonly`: users who signed

@@ -1063,3 +1063,28 @@ def test_course_page_links_to_its_review(testapp):
     assert "due in this course" not in client.get(f"/courses/{queue}").text
     page = client.get(f"/review?course={queue}").text
     assert "Nothing due in Queue" in page and "This course is archived" in page
+
+
+@pytest.mark.parametrize("action", ["answer", "skip", "suspend"])
+def test_course_review_posts_refuse_an_item_from_another_course(testapp, action):
+    """Both courses are the user's, but the item isn't in the one named."""
+    client, Session = testapp["client"], testapp["Session"]
+    _, queue, item_id = _two_courses(testapp)
+    r = client.post(f"/review/{item_id}/{action}?course={queue}",
+                    data={"answer": "1", "reason": "other", "csrf_token": _token(client)},
+                    follow_redirects=False)
+    assert r.status_code == 404
+    with Session() as s:  # "Which?" is untouched
+        assert s.exec(select(ReviewState).where(
+            ReviewState.quiz_item_id == uuid.UUID(item_id))).all() == []
+        assert s.exec(select(ItemFlag)).all() == []
+
+
+def test_result_from_another_course_returns_to_the_course_review(testapp):
+    client = testapp["client"]
+    c, queue, item_id = _two_courses(testapp)
+    r = client.post(f"/review/{item_id}/answer?course={c}",
+                    data={"answer": "1", "csrf_token": _token(client)}, follow_redirects=False)
+    assert client.get(r.headers["location"]).status_code == 200
+    r = client.get(f"/review/{item_id}/result?course={queue}", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/review/take?course={queue}"

@@ -274,10 +274,13 @@ def scoped_items(user_id, *entities):
     )
 
 
-def user_owns_item(session: Session, user_id, item_id) -> bool:
-    return session.exec(
-        scoped_items(user_id).where(QuizItem.id == item_id).with_only_columns(QuizItem.id)
-    ).first() is not None
+def user_owns_item(session: Session, user_id, item_id, course_id=None) -> bool:
+    """Whether the item is in one of the user's courses: in `course_id`'s
+    course, when given."""
+    query = scoped_items(user_id).where(QuizItem.id == item_id)
+    if course_id is not None:
+        query = query.where(Course.id == course_id)
+    return session.exec(query.with_only_columns(QuizItem.id)).first() is not None
 
 
 def active_items(user_id, *entities, course_id=None):

@@ -615,6 +615,10 @@ def _review_course(session: Session, user: User, course_id: UUID | None) -> Cour
     return owned_course(session, user, course_id) if course_id else None
 
 
+def _course_id(course: Course | None) -> UUID | None:
+    return course.id if course else None
+
+
 def _scoped(path: str, course: Course | None) -> str:
     """`path` kept inside a single-course review. The id is the stored
     course's, not the request's."""
@@ -629,7 +633,7 @@ def review_queue(
     user: User = Depends(current_user),
 ):
     scope = _review_course(session, user, course)
-    items = due_items(session, user.id, course_id=scope.id if scope else None)
+    items = due_items(session, user.id, course_id=_course_id(scope))
     return _queue_page(request, session, user, items, scope)
 
 
@@ -656,7 +660,7 @@ def _take_page(
     course: Course | None = None, status_code: int = 200, **ctx,
 ):
     # the answered item is no longer due; an unanswered one still counts itself
-    remaining = due_count(session, user.id, course.id if course else None)
+    remaining = due_count(session, user.id, _course_id(course))
     if not ctx.get("result"):
         remaining = max(0, remaining - 1)
     return templates.TemplateResponse(
@@ -688,7 +692,7 @@ def review_take(
     user: User = Depends(current_user),
 ):
     scope = _review_course(session, user, course)
-    queue = due_items(session, user.id, course_id=scope.id if scope else None)
+    queue = due_items(session, user.id, course_id=_course_id(scope))
     if not queue:
         return _queue_page(request, session, user, [], scope)
     return _take_page(request, session, user, queue[0], scope)
@@ -718,11 +722,11 @@ def _flag_owned_item(
 ) -> str:
     """Apply a grade.*_item change to one of the user's own items, else 404.
     Returns where the review goes on: the next question, in `course_id`'s
-    course when the review is narrowed to one."""
-    item = session.get(QuizItem, item_id)
-    if item is None or not user_owns_item(session, user.id, item_id):
-        raise HTTPException(404, "quiz item not found")
+    course when the review is narrowed to one (the item must be in it)."""
     course = _review_course(session, user, course_id)
+    item = session.get(QuizItem, item_id)
+    if item is None or not user_owns_item(session, user.id, item_id, _course_id(course)):
+        raise HTTPException(404, "quiz item not found")
     change(session, user.id, item.id, *args)
     return _scoped("/review/take", course)
 
@@ -793,10 +797,11 @@ def _answer_and_redirect(
     request: Request, session: Session, user: User, item_id: UUID, answer: str,
     course_id: UUID | None = None,
 ):
-    item = session.get(QuizItem, item_id)
-    if item is None or not user_owns_item(session, user.id, item_id):
-        raise HTTPException(404, "quiz item not found")
     course = _review_course(session, user, course_id)
+    item = session.get(QuizItem, item_id)
+    # in a single-course review the item has to be that course's
+    if item is None or not user_owns_item(session, user.id, item_id, _course_id(course)):
+        raise HTTPException(404, "quiz item not found")
     try:
         llm = None
         if item.question_type == "short_answer":
@@ -840,7 +845,8 @@ def review_result(
         ReviewState.user_id == user.id, ReviewState.quiz_item_id == item_id
     )).first()
     if (request.session.get("review_result") != str(item_id) or item is None
-            or state is None or not user_owns_item(session, user.id, item_id)):
+            or state is None
+            or not user_owns_item(session, user.id, item_id, _course_id(scope))):
         return RedirectResponse(_scoped("/review/take", scope), status_code=303)
     result = {
         "correct": state.last_result == "correct",

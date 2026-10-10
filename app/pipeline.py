@@ -228,6 +228,9 @@ def run_extraction(session: Session, downloader, course_id=None,
         if _past(deadline, result):
             break
         r = session.get(Resource, rid)
+        if r is None:  # retired by a sync since it was listed
+            counts["changed"] += 1
+            continue
         seen_hash = r.content_hash  # what the text will be of
         dl = downloader_for(r) if downloader_for else downloader
         if dl is None and r.type == "file" and downloader_for:
@@ -306,6 +309,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
     ids = chunkable_resource_ids(session, course_id, source)
     for i, rid in enumerate(ids, 1):
         r = session.get(Resource, rid)
+        if r is None:  # retired by a sync since it was listed
+            counts["changed"] += 1
+            continue
         seen_hash = r.content_hash
         has_chunks = session.exec(
             select(func.count()).select_from(Chunk).where(Chunk.resource_id == r.id)
@@ -332,7 +338,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r.attempts or r.retry_after:
                 _succeeded(r)
                 session.add(r)
-                session.commit()
+                if not commit_if_current(session, rid, seen_hash):
+                    counts["changed"] += 1  # its copied chunks went with the old content
+                    continue
             counts["chunks"] += shared
             counts["resources"] += 1
             counts["shared"] += 1
@@ -367,7 +375,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r.attempts >= MAX_CHUNK_ATTEMPTS:
                 r.status = "failed"  # existing chunks, if any, are kept
             session.add(r)
-            session.commit()
+            if not commit_if_current(session, rid, seen_hash):
+                counts["changed"] += 1
+                continue
             counts["errors"] += 1
             print(f"  error on resource {rid} (try {r.attempts}): {str(e)[:120]}",
                   flush=True)
@@ -375,7 +385,10 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
         if r.attempts or r.retry_after:
             _succeeded(r)
             session.add(r)
-            session.commit()
+            if not commit_if_current(session, rid, seen_hash):
+                counts["changed"] += 1
+                print(f"  chunk {i}/{len(ids)} changed meanwhile, dropped", flush=True)
+                continue
         counts["chunks"] += n
         print(f"  chunk {i}/{len(ids)} +{n}: {r.title[:60]}", flush=True)
         if n:

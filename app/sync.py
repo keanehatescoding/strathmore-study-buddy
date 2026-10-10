@@ -231,12 +231,14 @@ def commit_if_current(session: Session, resource_id, seen_hash) -> bool:
 
     The pipeline holds a Resource for minutes (downloads, LLM calls) while a
     sync may replace its content: without this it would write the old text
-    or chunks over the reset and mark the new content done.
+    or chunks over the reset and mark the new content done. A resource
+    retired meanwhile is gone: also False, and nothing is written.
     """
-    row = session.exec(
-        select(Resource.id, Resource.content_hash)
-        .where(Resource.id == resource_id).with_for_update()
-    ).first()
+    with session.no_autoflush:  # flushing an UPDATE to a deleted row would raise
+        row = session.exec(
+            select(Resource.id, Resource.content_hash)
+            .where(Resource.id == resource_id).with_for_update()
+        ).first()
     if row is None or row[1] != seen_hash:
         session.rollback()
         return False

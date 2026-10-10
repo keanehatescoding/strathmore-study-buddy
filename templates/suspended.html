@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Suspended questions — Strathmore Study Buddy{% endblock %}
+
+{% block body %}
+<div class="section-head">
+  <h1 class="flush">Suspended questions</h1>
+</div>
+{% if suspended %}
+<p class="section-note">These are left out of your reviews. Restoring one puts it back on its schedule.</p>
+<ul class="rows suspended">
+  {% for item, flag in suspended %}
+  <li>
+    <span class="grow">
+      <span class="question">{{ item.question[:160] }}{% if item.question|length > 160 %}…{% endif %}</span>
+      <span class="when">{{ reasons.get(flag.reason, reasons["other"]) }}{% if flag.note %} — {{ flag.note }}{% endif %}</span>
+    </span>
+    <form method="post" action="/review/{{ item.id }}/restore">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-small">Restore</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<div class="empty">
+  <p>No suspended questions.</p>
+</div>
+{% endif %}
+<p class="actions"><a href="/review">Back to queue</a></p>
+{% endblock %}

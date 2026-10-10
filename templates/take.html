@@ -86,9 +86,33 @@
 
     <div class="actions">
       <button type="submit" class="btn btn-primary">Submit</button>
+      {# posts the skip form below: forms can't nest #}
+      <button type="submit" form="skip-form" class="btn" formnovalidate>Skip for now</button>
       <a href="/review">Back to queue</a>
     </div>
   </form>
+  <form id="skip-form" method="post" action="/review/{{ item.id }}/skip">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  </form>
   {% endif %}
+
+  <details class="report">
+    <summary>Something wrong with this question?</summary>
+    <form method="post" action="/review/{{ item.id }}/suspend" class="report-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p class="section-note">Suspending takes it out of your reviews. You can bring it back from the queue page.</p>
+      <label for="suspend-reason">What's wrong?</label>
+      <select id="suspend-reason" name="reason" required>
+        {% for key, label in suspend_reasons.items() %}
+        <option value="{{ key }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+      <label for="suspend-note">Anything to add? <span class="optional">(optional)</span></label>
+      <textarea id="suspend-note" name="note" rows="2" maxlength="{{ max_note_chars }}"></textarea>
+      <div class="actions">
+        <button type="submit" class="btn btn-small">Suspend question</button>
+      </div>
+    </form>
+  </details>
 </div>
 {% endblock %}

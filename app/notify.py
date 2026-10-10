@@ -150,13 +150,14 @@ def enqueue_new_material(session: Session, course_id, new_items: int) -> Notific
     another email. send_pending counts an attempt before it renders, so an
     event it is delivering is never merged into after its email was made.
 
-    Returns None when nothing is new or the course has no owner: there is
-    nobody to tell, and guessing a recipient would misattribute the course.
+    Returns None when nothing is new, the course is archived or it has no
+    owner: there is nobody to tell, and guessing a recipient would
+    misattribute the course.
     """
     if new_items <= 0:
         return None
     course = session.get(Course, course_id)
-    if course is None or course.user_id is None:
+    if course is None or course.user_id is None or course.archived:
         return None
     owner = session.get(User, course.user_id)
     if owner is None or not owner.notify_email:

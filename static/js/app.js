@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 1. Course filter (shown only on long course lists)
   const searchInput = document.getElementById('course-search');
   if (searchInput) {
-    const rows = document.querySelectorAll('.course-row');
+    const rows = document.querySelectorAll('#courses-list .course-row');
     const emptyNotice = document.getElementById('search-empty-state');
 
     searchInput.addEventListener('input', (e) => {

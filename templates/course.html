@@ -13,6 +13,15 @@
   <p class="page-meta">
     {% if course.code %}{{ course.code }} · {% endif %}{{ "Google Classroom" if course.source == "classroom" else "Moodle" }} · {{ topics|length }} topic{% if topics|length != 1 %}s{% endif %}
   </p>
+  <form method="post" action="/courses/{{ course.id }}/{{ "unarchive" if course.archived else "archive" }}" class="archive-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if course.archived %}
+    <span class="when">Archived: hidden from Courses and left out of your reviews.</span>
+    <button type="submit" class="btn btn-small">Unarchive</button>
+    {% else %}
+    <button type="submit" class="btn btn-small" title="Hide this course and stop reviewing it. Your history stays.">Archive course</button>
+    {% endif %}
+  </form>
 </header>
 
 {% if assignments or past_assignments %}

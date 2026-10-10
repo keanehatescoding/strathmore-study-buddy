@@ -6,7 +6,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Column, DateTime, Index, Text, UniqueConstraint, text, true
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    Index,
+    Text,
+    UniqueConstraint,
+    false,
+    text,
+    true,
+)
 from sqlmodel import Field, SQLModel
 
 
@@ -44,6 +54,9 @@ class Course(SQLModel, table=True):
     source_id: str = Field(index=True)
     name: str
     code: Optional[str] = Field(default=None)
+    # set by its owner: off Courses, the review queue and the pipeline;
+    # sync still updates it and its history stays
+    archived: bool = Field(default=False, sa_column_kwargs={"server_default": false()})
 
 
 class Topic(SQLModel, table=True):

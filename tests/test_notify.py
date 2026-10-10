@@ -718,6 +718,15 @@ def test_new_material_skips_opted_out_owner(session):
     assert notify.enqueue_new_material(session, course.id, 5) is None
 
 
+def test_archived_course_sends_no_news_and_no_review_reminder(session):
+    user, course = _course_with_items(session, n_chunks=3)
+    _set(session, course, archived=True)
+    assert notify.enqueue_new_material(session, course.id, 5) is None
+    assert notify.check_review_due(session, user.id, threshold=3) is None
+    _set(session, course, archived=False)
+    assert notify.check_review_due(session, user.id, threshold=3) is not None
+
+
 def test_review_due_pauses_for_inactive_users(session):
     user, course = _course_with_items(session, n_chunks=3)
     old = datetime.now(timezone.utc) - notify.REVIEW_DUE_ACTIVE_WINDOW - timedelta(days=1)

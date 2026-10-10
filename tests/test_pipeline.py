@@ -18,6 +18,7 @@ from app.extract import (
 from app.models import Chunk, Course, QuizItem, Resource, Topic
 from app.moodle import MoodleError
 from app.pipeline import (
+    chunkable_resource_ids,
     pending_resource_ids,
     quiz_chunk_ids,
     run_chunking,
@@ -354,6 +355,26 @@ def test_stage_ids_are_scoped_to_course(session):
     my_course_id = session.get(Topic, mine.topic_id).course_id
     assert quiz_chunk_ids(session, my_course_id) == [mine_chunk.id]
     assert len(quiz_chunk_ids(session)) == 2
+
+
+def test_stage_ids_skip_archived_courses(session):
+    pending = _resource(session, source_id="p")
+    extracted = _resource(session, source_id="e", status="extracted", extracted_text="t")
+    session.add(Chunk(resource_id=extracted.id, title="c", content="t", order=0))
+    session.commit()
+    chunk_id = session.exec(select(Chunk.id)).one()
+    course = session.exec(select(Course)).one()
+    for course_id in (None, course.id):
+        assert pending_resource_ids(session, course_id) == [pending.id]
+        assert chunkable_resource_ids(session, course_id) == [extracted.id]
+        assert quiz_chunk_ids(session, course_id, attempt=1) == [chunk_id]
+    course.archived = True
+    session.add(course)
+    session.commit()
+    for course_id in (None, course.id):  # no downloads or LLM calls for it
+        assert pending_resource_ids(session, course_id) == []
+        assert chunkable_resource_ids(session, course_id) == []
+        assert quiz_chunk_ids(session, course_id, attempt=1) == []
 
 
 def _classroom_file(session, owner_email):

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlmodel import select
 
+from app.grade import due_count, due_items
 from app.models import Chunk, Course, QuizItem, Resource, ReviewState, Topic, User
 from tests.dbutil import make_engine
 
@@ -603,3 +604,93 @@ def test_nav_badge_failure_still_renders_the_page(testapp, monkeypatch):
     r = testapp["client"].get("/review")
     assert r.status_code == 200 and "nav-count" not in r.text
     assert "<strong>2</strong> questions due" in r.text  # falls back to the queue
+
+
+def _course_id(Session):
+    with Session() as s:
+        return str(s.exec(select(Course)).one().id)
+
+
+def test_archived_course_leaves_courses_and_review_but_keeps_history(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    item_id = _seed(Session)
+    cid = _course_id(Session)
+    with Session() as s:  # a second item, so one stays due after answering the first
+        chunk = s.exec(select(Chunk)).one()
+        s.add(QuizItem(chunk_id=chunk.id, question="Why?", question_type="mcq",
+                       options=["a", "b"], correct_answer="0", generation_key="g2"))
+        s.commit()
+    token = _token(client)
+    client.post(f"/review/{item_id}/answer", data={"answer": "1", "csrf_token": token})
+    with Session() as s:
+        assert due_count(s, testapp["user_id"]) == 1
+
+    r = client.post(f"/courses/{cid}/archive", data={"csrf_token": token},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+
+    home = client.get("/").text
+    assert 'id="courses-list"' not in home and "All your courses are archived" in home
+    assert "Archived (1)" in home and f'href="/courses/{cid}"' in home
+    assert "due for review" not in home  # the nav badge and the strip are gone
+    assert "Why?" not in client.get("/review").text
+    with Session() as s:
+        assert due_count(s, testapp["user_id"]) == 0
+        assert due_items(s, testapp["user_id"]) == []
+        # history stays: the answer, its schedule and the items themselves
+        assert s.exec(select(ReviewState)).one().last_result == "correct"
+        assert len(s.exec(select(QuizItem)).all()) == 2
+    stats = client.get("/stats").text
+    assert "100.0%" in stats
+
+    # the course page still opens, and offers the way back
+    page = client.get(f"/courses/{cid}").text
+    assert f'action="/courses/{cid}/unarchive"' in page and "Archived:" in page
+    # an item already on screen when the course was archived can still be answered
+    result = client.get(f"/review/{item_id}/result")
+    assert result.status_code == 200
+
+    r = client.post(f"/courses/{cid}/unarchive", data={"csrf_token": token},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/courses/{cid}"
+    home = client.get("/").text
+    assert 'id="courses-list"' in home and "Archived (" not in home
+    assert "Why?" in client.get("/review").text
+    assert f'action="/courses/{cid}/archive"' in client.get(f"/courses/{cid}").text
+
+
+def test_archive_needs_csrf_token_and_ownership(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    _seed(Session)
+    cid = _course_id(Session)
+    token = _token(client)
+    assert client.post(f"/courses/{cid}/archive", data={}).status_code == 403
+    with Session() as s:
+        other = s.exec(select(User).where(User.email == "s@x.edu")).one()
+        theirs = Course(user_id=other.id, source="moodle", source_id="c2", name="Theirs")
+        s.add(theirs)
+        s.commit()
+        theirs_id = theirs.id
+    for action in ("archive", "unarchive"):
+        r = client.post(f"/courses/{theirs_id}/{action}", data={"csrf_token": token})
+        assert r.status_code == 404
+    with Session() as s:
+        assert [c.archived for c in s.exec(select(Course)).all()] == [False, False]
+
+
+def test_archived_course_listed_apart_from_active_ones(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    with Session() as s:
+        s.add_all([
+            Course(user_id=testapp["user_id"], source="moodle", source_id="old",
+                   name="Last Semester", code="OLD 101", archived=True),
+            Course(user_id=testapp["user_id"], source="moodle", source_id="new",
+                   name="This Semester"),
+        ])
+        s.commit()
+    home = client.get("/").text
+    active, _, archived = home.partition('<details class="archived">')
+    assert "This Semester" in active and "Last Semester" not in active
+    assert "1 course<" in active
+    assert "Archived (1)" in archived and "Last Semester" in archived
+    assert "All your courses are archived" not in home

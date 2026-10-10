@@ -998,3 +998,21 @@ def test_sync_now_needs_a_connection_and_a_csrf_token(testapp, no_shared_keys):
     assert client.post("/sync", data={"csrf_token": "wrong"}).status_code == 403
     with testapp["Session"]() as s:
         assert _sync_jobs(s) == []
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="advisory locks need Postgres")
+def test_request_sync_checks_and_queues_under_one_lock(session, no_shared_keys):
+    import app.pipeline as pipeline
+    from app.auth import sign_in
+
+    user = sign_in(session, "s@x.edu", "refresh-token")
+    other = sign_in(session, "o@x.edu", "refresh-token")
+    # another request of theirs is between its check and its enqueues: this
+    # one mustn't run its own check until that one's jobs are on record
+    with pipeline.advisory_lock("app.request_sync:s@x.edu", make_engine()) as held:
+        assert held
+        assert jobs.request_sync(session, user) == ("syncing", None)
+        assert _sync_jobs(session) == []
+        assert jobs.request_sync(session, other) == ("queued", None)  # per user
+    assert jobs.request_sync(session, user) == ("queued", None)  # lock released
+    assert len(_sync_jobs(session)) == 2

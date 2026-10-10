@@ -177,27 +177,36 @@ def request_sync(session: Session, user: User,
 
     - "queued": a sync of each connected source is now pending;
     - "disconnected": no Moodle key or Classroom grant to sync with;
-    - "syncing": one is already pending or running, nothing added;
+    - "syncing": one is already pending or running (or another request of
+      theirs is queuing one this instant), nothing added;
     - "wait": their last sync was queued under MANUAL_SYNC_EVERY ago, and
       `wait` is how long until they may ask again. Any sync counts, the
       cron's or a sign-in's too: the courses are that fresh either way.
     """
+    from app.pipeline import advisory_lock
+
     sources = _connected_sources(user)
     if not sources:
         return "disconnected", None
     email = user.email  # the enqueue commits, expiring `user`
-    mine = _user_syncs(session, user)
-    if any(j.status in ("pending", "running") for j in mine):
-        return "syncing", None
-    if mine:
-        latest = max(j.created_at for j in mine)
-        if latest.tzinfo is None:  # SQLite returns naive datetimes
-            latest = latest.replace(tzinfo=timezone.utc)
-        wait = latest + MANUAL_SYNC_EVERY - (now or _utcnow())
-        if wait > timedelta(0):
-            return "wait", wait
-    for source in sources:
-        enqueue_sync_once(session, source, email)  # None: a racing click won
+    # The check and the enqueues are several commits. Without the lock, a
+    # second click that passed the check could still queue after the first
+    # one's job has finished: uq_jobs_active_user_job only sees active jobs.
+    with advisory_lock(f"app.request_sync:{email}", session.get_bind()) as got:
+        if not got:
+            return "syncing", None  # another click is queuing one right now
+        mine = _user_syncs(session, user)
+        if any(j.status in ("pending", "running") for j in mine):
+            return "syncing", None
+        if mine:
+            latest = max(j.created_at for j in mine)
+            if latest.tzinfo is None:  # SQLite returns naive datetimes
+                latest = latest.replace(tzinfo=timezone.utc)
+            wait = latest + MANUAL_SYNC_EVERY - (now or _utcnow())
+            if wait > timedelta(0):
+                return "wait", wait
+        for source in sources:
+            enqueue_sync_once(session, source, email)
     return "queued", None
 
 

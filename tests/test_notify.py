@@ -65,9 +65,40 @@ def test_new_material_batched_per_course(session):
     user, course = _course_with_items(session)
     event = notify.enqueue_new_material(session, course.id, 5)
     assert event.type == "new_material"
-    assert event.payload == {"course": "Data Structures", "code": "CS 301", "new_items": 5}
+    assert event.payload == {"course": "Data Structures", "code": "CS 301",
+                             "course_id": str(course.id), "new_items": 5}
     assert event.user_id == user.id and event.sent is False
     assert notify.enqueue_new_material(session, course.id, 0) is None
+
+
+def test_new_material_coalesces_into_queued_event(session):
+    """Each slice of a sliced pipeline job adds to one email, not one each."""
+    user, course = _course_with_items(session)
+    other = Course(user_id=user.id, source="moodle", source_id="c2",
+                   name="Algorithms", code="CS 302")
+    session.add(other)
+    session.commit()
+    first = notify.enqueue_new_material(session, course.id, 5)
+    created = first.created_at
+    again = notify.enqueue_new_material(session, course.id, 3)
+    assert again.id == first.id and again.payload["new_items"] == 8
+    assert notify._aware(again.created_at) >= notify._aware(created)  # expiry restarts
+    separate = notify.enqueue_new_material(session, other.id, 2)
+    assert separate.id != first.id  # per course
+    assert len(session.exec(select(NotificationEvent)).all()) == 2
+
+
+def test_new_material_does_not_coalesce_into_tried_or_sent_events(session, monkeypatch):
+    user, course = _course_with_items(session)
+    tried = notify.enqueue_new_material(session, course.id, 5)
+    tried.attempts = 1  # may have been delivered with its old count
+    session.add(tried)
+    session.commit()
+    assert notify.enqueue_new_material(session, course.id, 3).id != tried.id
+    _fake_batches(monkeypatch)
+    notify.send_pending(session, "key", "from@x")
+    later = notify.enqueue_new_material(session, course.id, 1)
+    assert later.sent is False and later.payload["new_items"] == 1
 
 
 def test_review_due_not_resent_hourly_after_delivery(session, monkeypatch):
@@ -310,6 +341,47 @@ def test_rate_limit_stops_run_and_leaves_rest_queued(session, monkeypatch):
     assert out == {"sent": 0, "failed": notify.BATCH_SIZE + 1,
                    "errors": {"rate_limited": notify.BATCH_SIZE + 1}}
     assert not any(e.sent for e in session.exec(select(NotificationEvent)))
+
+
+def test_failing_event_gives_up_after_max_attempts(session, monkeypatch):
+    def bad_key(emails):
+        raise notify.EmailError("resend returned http_401", "http_401")
+
+    calls = _fake_batches(monkeypatch, bad_key)
+    _owned_events(session, 1)
+    for _ in range(notify.MAX_SEND_ATTEMPTS - 1):
+        assert notify.send_pending(session, "key", "from@x")["errors"] == {"http_401": 1}
+    event = session.exec(select(NotificationEvent)).one()
+    assert event.attempts == notify.MAX_SEND_ATTEMPTS - 1 and event.failed_reason is None
+    notify.send_pending(session, "key", "from@x")
+    assert event.failed_reason == notify.GAVE_UP and event.sent is False
+    # out of the queue: no more requests for it
+    calls = _fake_batches(monkeypatch)
+    assert notify.send_pending(session, "key", "from@x") == {
+        "sent": 0, "failed": 0, "errors": {}}
+    assert calls == []
+
+
+def test_rate_limit_and_missing_key_cost_no_attempt(session, monkeypatch):
+    _fake_batches(monkeypatch, lambda emails: (_ for _ in ()).throw(
+        notify.RateLimitedError("429")))
+    _owned_events(session, 1)
+    notify.send_pending(session, "key", "from@x")
+    notify.send_pending(session, "", "from@x")
+    assert session.exec(select(NotificationEvent)).one().attempts == 0
+
+
+def test_old_new_material_expires_instead_of_sending(session, monkeypatch):
+    """After an outage, days-old 'new material' news is dropped, not burst out."""
+    calls = _fake_batches(monkeypatch)
+    _, course = _course_with_items(session)
+    old = notify.enqueue_new_material(session, course.id, 4)
+    old.created_at = datetime.now(timezone.utc) - notify.NEW_MATERIAL_MAX_AGE - timedelta(hours=1)
+    session.add(old)
+    session.commit()
+    out = notify.send_pending(session, "key", "from@x")
+    assert out == {"sent": 0, "failed": 1, "errors": {"expired": 1}}
+    assert calls == [] and old.failed_reason == "expired"
 
 
 def test_no_api_key_sends_nothing(session, monkeypatch):

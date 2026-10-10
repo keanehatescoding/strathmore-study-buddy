@@ -226,6 +226,8 @@ class NotificationEvent(SQLModel, table=True):
     # set when the event can never be delivered (no recipient, opted out, ...);
     # such events leave the queue instead of being retried every pass
     failed_reason: Optional[str] = Field(default=None)
+    # failed delivery tries; at MAX_SEND_ATTEMPTS the event gives up
+    attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
 
 
 ACTIVE_NOTIFY_WHERE = "type = 'send_notifications' AND status IN ('pending', 'running')"

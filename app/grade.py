@@ -9,6 +9,8 @@
   count as due immediately (equivalent to next_review_date = now at creation).
 - Only due items can be answered: a replayed or concurrent submit is rejected
   (NotDue) instead of advancing the schedule twice.
+- A user can skip an item (to the back of that day's queue) or suspend it
+  (never scheduled again, with the reason kept): see ItemFlag.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone, tzinfo
 
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlmodel import Session, func, select
 
@@ -26,6 +28,7 @@ from app.llm_schemas import GradeOut
 from app.models import (
     Chunk,
     Course,
+    ItemFlag,
     QuizItem,
     Resource,
     ReviewLog,
@@ -45,6 +48,15 @@ from app.srs import (
 
 MAX_ANSWER_CHARS = 4000
 NEW_ITEMS_PER_DAY = 20
+MAX_NOTE_CHARS = 500
+# why a question was suspended: stored key -> the label on the form
+SUSPEND_REASONS = {
+    "wrong_answer": "The marked answer is wrong",
+    "unclear": "The question is unclear or broken",
+    "off_topic": "It isn't about the course material",
+    "duplicate": "It repeats another question",
+    "other": "Something else",
+}
 
 GRADE_SYSTEM = """You grade a student's short answer leniently on phrasing.
 You are given the question, a reference answer, and the key points a correct
@@ -247,11 +259,13 @@ def submit_answer(
     }
 
 
-def scoped_items(user_id):
+def scoped_items(user_id, *entities):
     """QuizItems in the user's courses. Unclaimed pre-auth rows belong to
-    nobody until their owner signs in or syncs (see auth.sign_in, sync)."""
+    nobody until their owner signs in or syncs (see auth.sign_in, sync).
+    Selects `entities` instead when given, for rows joined on by the caller."""
     return (
-        select(QuizItem)
+        select(*(entities or (QuizItem,)))
+        .select_from(QuizItem)
         .join(Chunk, Chunk.id == QuizItem.chunk_id)
         .join(Resource, Resource.id == Chunk.resource_id)
         .join(Topic, Topic.id == Resource.topic_id)
@@ -266,9 +280,15 @@ def user_owns_item(session: Session, user_id, item_id) -> bool:
     ).first() is not None
 
 
-def active_items(user_id):
-    """Scoped items up for review: those outside archived courses."""
-    return scoped_items(user_id).where(Course.archived == False)  # noqa: E712
+def active_items(user_id, *entities):
+    """Scoped items up for review: those outside archived courses that the
+    user hasn't suspended. Joins the user's ItemFlag, when there is one."""
+    return (
+        scoped_items(user_id, *entities)
+        .outerjoin(ItemFlag, and_(ItemFlag.quiz_item_id == QuizItem.id,
+                                  ItemFlag.user_id == user_id))
+        .where(Course.archived == False, ItemFlag.suspended_at.is_(None))  # noqa: E712
+    )
 
 
 def _new(user_id):
@@ -300,21 +320,46 @@ def _new_allowance(session: Session, user_id, now: datetime) -> int:
 
 def due_items(session: Session, user_id, limit: int = 20) -> list[QuizItem]:
     """Review queue: most-overdue reviews first, then new items up to the
-    daily cap, so a backlog of new items can't starve reviews."""
+    daily cap, so a backlog of new items can't starve reviews. Items skipped
+    today come last, in the order they were skipped."""
     now = datetime.now(timezone.utc)
+    day_start = local_day_start(now, user_zone(session, user_id))
+    unskipped = or_(ItemFlag.skipped_at.is_(None), ItemFlag.skipped_at < day_start)
     items = list(session.exec(
         _overdue(user_id, now)
+        .where(unskipped)
         .order_by(ReviewState.next_review_date, Topic.order, Chunk.order,
                   QuizItem.generation_key)
         .limit(limit)
     ).all())
-    room = min(limit - len(items), _new_allowance(session, user_id, now))
+    allowance = _new_allowance(session, user_id, now)
+    room = min(limit - len(items), allowance)
     if room > 0:
-        items += session.exec(
+        fresh = session.exec(
             _new(user_id)
+            .where(unskipped)
             .order_by(Topic.order, Chunk.order, QuizItem.generation_key)
             .limit(room)
         ).all()
+        items += fresh
+        allowance -= len(fresh)
+    if len(items) < limit:
+        skipped = session.exec(
+            active_items(user_id, QuizItem, ReviewState.id)
+            .outerjoin(ReviewState, and_(ReviewState.quiz_item_id == QuizItem.id,
+                                         ReviewState.user_id == user_id))
+            .where(ItemFlag.skipped_at >= day_start,
+                   or_(ReviewState.id.is_(None), ReviewState.next_review_date <= now))
+            .order_by(ItemFlag.skipped_at, QuizItem.generation_key)
+        ).all()
+        for item, state_id in skipped:
+            if len(items) >= limit:
+                break
+            if state_id is None:  # a new item: still held to the daily cap
+                if allowance <= 0:
+                    continue
+                allowance -= 1
+            items.append(item)
     return items
 
 
@@ -325,3 +370,46 @@ def due_count(session: Session, user_id) -> int:
     ).one()
     new = session.exec(_new(user_id).with_only_columns(func.count(QuizItem.id))).one()
     return overdue + min(new, _new_allowance(session, user_id, now))
+
+
+def _flag(session: Session, user_id, item_id, **values) -> None:
+    """Upsert the user's ItemFlag for an item, so a double click can't 500
+    on the primary key."""
+    dialect = {"postgresql": postgresql, "sqlite": sqlite}[session.get_bind().dialect.name]
+    session.exec(
+        dialect.insert(ItemFlag)
+        .values(user_id=user_id, quiz_item_id=item_id, **values)
+        .on_conflict_do_update(index_elements=["user_id", "quiz_item_id"], set_=values)
+    )
+    session.commit()
+
+
+def skip_item(session: Session, user_id, item_id) -> None:
+    """Send an item to the back of today's queue. Its schedule is untouched."""
+    _flag(session, user_id, item_id, skipped_at=datetime.now(timezone.utc))
+
+
+def suspend_item(session: Session, user_id, item_id, reason: str, note: str = "") -> None:
+    """Stop scheduling an item for this user, recording why. An unknown
+    reason is filed under "other" rather than refused."""
+    if reason not in SUSPEND_REASONS:
+        reason = "other"
+    note = strip_nul(note).strip()[:MAX_NOTE_CHARS]  # Postgres rejects NUL
+    _flag(session, user_id, item_id, suspended_at=datetime.now(timezone.utc),
+          reason=reason, note=note or None)
+
+
+def restore_item(session: Session, user_id, item_id) -> None:
+    """Put a suspended item back on its schedule."""
+    _flag(session, user_id, item_id, suspended_at=None, reason=None, note=None)
+
+
+def suspended_items(session: Session, user_id) -> list[tuple[QuizItem, ItemFlag]]:
+    """The user's suspended items with their flags, latest first."""
+    return list(session.exec(
+        scoped_items(user_id, QuizItem, ItemFlag)
+        .join(ItemFlag, and_(ItemFlag.quiz_item_id == QuizItem.id,
+                             ItemFlag.user_id == user_id))
+        .where(ItemFlag.suspended_at.is_not(None))
+        .order_by(ItemFlag.suspended_at.desc(), QuizItem.generation_key)
+    ).all())

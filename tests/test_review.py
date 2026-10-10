@@ -1,13 +1,14 @@
 """Phase 5 tests: review queue, answering (MCQ), stats."""
 
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlmodel import select
 
 from app.grade import due_count, due_items
-from app.models import Chunk, Course, QuizItem, Resource, ReviewState, Topic, User
+from app.models import Chunk, Course, ItemFlag, QuizItem, Resource, ReviewState, Topic, User
 from tests.dbutil import make_engine
 
 
@@ -694,3 +695,197 @@ def test_archived_course_listed_apart_from_active_ones(testapp):
     assert "1 course<" in active
     assert "Archived (1)" in archived and "Last Semester" in archived
     assert "All your courses are archived" not in home
+
+
+def _item_ids(Session) -> dict:
+    with Session() as s:
+        return {i.question: str(i.id) for i in s.exec(select(QuizItem)).all()}
+
+
+def _served(client) -> str:
+    """The question /review/take is showing."""
+    page = client.get("/review/take").text
+    return re.search(r'<h1 class="quiz-question">(.*?)</h1>', page).group(1)
+
+
+def test_skip_sends_the_question_to_the_back_of_the_queue(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    _seed_overdue(testapp, 3)
+    ids = _item_ids(Session)
+    token = _token(client)
+    page = client.get("/review/take").text
+    assert "Q0?" in page and f'action="/review/{ids["Q0?"]}/skip"' in page
+
+    r = client.post(f"/review/{ids['Q0?']}/skip", data={"csrf_token": token},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/review/take"
+    assert _served(client) == "Q1?"
+    with Session() as s:
+        assert [i.question for i in due_items(s, testapp["user_id"])] == ["Q1?", "Q2?", "Q0?"]
+        assert due_count(s, testapp["user_id"]) == 3  # skipped, still due
+
+    # skipping the rest brings the first one round again, oldest skip first
+    client.post(f"/review/{ids['Q1?']}/skip", data={"csrf_token": token})
+    client.post(f"/review/{ids['Q2?']}/skip", data={"csrf_token": token})
+    assert _served(client) == "Q0?"
+    client.post(f"/review/{ids['Q0?']}/skip", data={"csrf_token": token})  # twice: no 500
+    assert _served(client) == "Q1?"
+    with Session() as s:  # the schedule itself never moved
+        assert {st.repetitions for st in s.exec(select(ReviewState)).all()} == {1}
+        assert {st.answered_at for st in s.exec(select(ReviewState)).all()} == {None}
+
+    # and a skipped question can still be answered
+    r = client.post(f"/review/{ids['Q1?']}/answer", data={"answer": "0", "csrf_token": token})
+    assert "Correct" in r.text
+    assert _served(client) == "Q2?"
+
+
+def test_skip_lasts_only_for_the_day(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    _seed_overdue(testapp, 2)
+    ids = _item_ids(Session)
+    with Session() as s:
+        s.add(ItemFlag(user_id=testapp["user_id"], quiz_item_id=uuid.UUID(ids["Q0?"]),
+                       skipped_at=datetime.now(timezone.utc) - timedelta(days=2)))
+        s.commit()
+    assert _served(client) == "Q0?"
+
+
+def test_skipped_new_item_goes_behind_other_new_items_and_keeps_the_cap(testapp, monkeypatch):
+    client, Session = testapp["client"], testapp["Session"]
+    first = _seed(Session)
+    with Session() as s:
+        chunk = s.exec(select(Chunk)).one()
+        s.add(QuizItem(chunk_id=chunk.id, question="Why?", question_type="mcq",
+                       options=["a", "b"], correct_answer="0", generation_key="g2"))
+        s.commit()
+    token = _token(client)
+    assert _served(client) == "Which?"
+    client.post(f"/review/{first}/skip", data={"csrf_token": token})
+    assert _served(client) == "Why?"
+    with Session() as s:
+        assert [i.question for i in due_items(s, testapp["user_id"])] == ["Why?", "Which?"]
+        assert s.exec(select(ReviewState)).all() == []  # a skip doesn't start the item
+
+    monkeypatch.setattr("app.grade.NEW_ITEMS_PER_DAY", 1)
+    with Session() as s:  # one slot: the unskipped item takes it
+        assert [i.question for i in due_items(s, testapp["user_id"])] == ["Why?"]
+        assert due_count(s, testapp["user_id"]) == 1
+
+
+def test_suspend_drops_the_question_and_restore_brings_it_back(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    _seed_overdue(testapp, 2)
+    ids = _item_ids(Session)
+    token = _token(client)
+    page = client.get("/review/take").text
+    assert f'action="/review/{ids["Q0?"]}/suspend"' in page
+    assert 'value="wrong_answer"' in page and "suspended question" not in client.get("/review").text
+
+    r = client.post(f"/review/{ids['Q0?']}/suspend",
+                    data={"reason": "wrong_answer", "note": "  b is right\x00 ",
+                          "csrf_token": token}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/review/take"
+    assert _served(client) == "Q1?"
+    with Session() as s:
+        assert [i.question for i in due_items(s, testapp["user_id"])] == ["Q1?"]
+        assert due_count(s, testapp["user_id"]) == 1
+        flag = s.exec(select(ItemFlag)).one()
+        assert (flag.reason, flag.note) == ("wrong_answer", "b is right")
+        assert flag.suspended_at is not None
+        assert len(s.exec(select(ReviewState)).all()) == 2  # its schedule is kept
+
+    queue = client.get("/review").text
+    assert "Q0?" not in queue and '<a href="/review/suspended">1 suspended question</a>' in queue
+    listed = client.get("/review/suspended").text
+    assert "Q0?" in listed and "The marked answer is wrong — b is right" in listed
+    assert f'action="/review/{ids["Q0?"]}/restore"' in listed and "Q1?" not in listed
+
+    r = client.post(f"/review/{ids['Q0?']}/restore", data={"csrf_token": token},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/review/suspended"
+    assert "No suspended questions" in client.get("/review/suspended").text
+    with Session() as s:
+        assert due_count(s, testapp["user_id"]) == 2
+        flag = s.exec(select(ItemFlag)).one()
+        assert (flag.suspended_at, flag.reason, flag.note) == (None, None, None)
+    assert "suspended question" not in client.get("/review").text
+
+
+def test_suspending_the_last_question_empties_the_queue(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    item_id = _seed(Session)
+    token = _token(client)
+    r = client.post(f"/review/{item_id}/suspend", data={"reason": "unclear", "csrf_token": token})
+    assert r.status_code == 200 and "Nothing due" in r.text
+    assert "1 suspended question" in r.text  # the way back, even with nothing due
+
+
+def test_suspend_files_an_unknown_reason_under_other_and_caps_the_note(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    item_id = _seed(Session)
+    client.post(f"/review/{item_id}/suspend",
+                data={"reason": "<script>", "note": "x" * 2000, "csrf_token": _token(client)})
+    with Session() as s:
+        flag = s.exec(select(ItemFlag)).one()
+        assert flag.reason == "other" and len(flag.note) == 500
+    assert "Something else — xxx" in client.get("/review/suspended").text
+
+
+def test_result_page_can_report_but_not_skip(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    item_id = _seed(Session)
+    token = _token(client)
+    r = client.post(f"/review/{item_id}/answer", data={"answer": "0", "csrf_token": token})
+    assert "Incorrect" in r.text and f'action="/review/{item_id}/suspend"' in r.text
+    assert "/skip" not in r.text
+    client.post(f"/review/{item_id}/suspend", data={"reason": "wrong_answer", "csrf_token": token})
+    with Session() as s:  # suspended while not yet due: it never comes back by itself
+        state = s.exec(select(ReviewState)).one()
+        state.next_review_date = datetime.now(timezone.utc) - timedelta(days=1)
+        s.add(state)
+        s.commit()
+        assert due_count(s, testapp["user_id"]) == 0
+        assert due_items(s, testapp["user_id"]) == []
+
+
+@pytest.mark.parametrize("action", ["skip", "suspend", "restore"])
+def test_flagging_needs_csrf_token_and_ownership(testapp, action):
+    client, Session = testapp["client"], testapp["Session"]
+    item_id = _seed(Session)
+    theirs = _other_users_item(Session)
+    token = _token(client)
+    assert client.post(f"/review/{item_id}/{action}", data={}).status_code == 403
+    r = client.post(f"/review/{theirs}/{action}", data={"csrf_token": token})
+    assert r.status_code == 404
+    r = client.post(f"/review/{uuid.uuid4()}/{action}", data={"csrf_token": token})
+    assert r.status_code == 404
+    with Session() as s:
+        assert s.exec(select(ItemFlag)).all() == []
+
+
+def test_suspended_list_is_scoped_to_the_user(testapp):
+    client, Session = testapp["client"], testapp["Session"]
+    _seed(Session)
+    theirs = _other_users_item(Session)
+    with Session() as s:
+        other = s.exec(select(User).where(User.email == "s@x.edu")).one()
+        s.add(ItemFlag(user_id=other.id, quiz_item_id=uuid.UUID(str(theirs)),
+                       suspended_at=datetime.now(timezone.utc), reason="other"))
+        s.commit()
+        assert due_count(s, testapp["user_id"]) == 1  # their flag isn't ours
+    assert "No suspended questions" in client.get("/review/suspended").text
+
+
+def test_purging_a_resource_drops_its_flags(testapp):
+    from app.sync import _purge_derived
+
+    Session = testapp["Session"]
+    item_id = _seed(Session)
+    with Session() as s:
+        s.add(ItemFlag(user_id=testapp["user_id"], quiz_item_id=uuid.UUID(item_id),
+                       suspended_at=datetime.now(timezone.utc), reason="other"))
+        s.commit()
+        _purge_derived(s, s.exec(select(Resource)).one().id)
+        s.commit()
+        assert s.exec(select(ItemFlag)).all() == []

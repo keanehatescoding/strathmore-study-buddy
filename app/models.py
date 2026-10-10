@@ -198,6 +198,28 @@ class ReviewState(SQLModel, table=True):
     last_answer: Optional[str] = Field(default=None, sa_column=Column(Text))
 
 
+class ItemFlag(SQLModel, table=True):
+    """A user's say on one question, apart from its schedule: skipped (to the
+    back of that day's queue) or suspended (never scheduled) with the reason."""
+
+    __tablename__ = "item_flags"
+
+    user_id: uuid.UUID = Field(foreign_key="users.id", primary_key=True)
+    quiz_item_id: uuid.UUID = Field(
+        foreign_key="quiz_items.id", primary_key=True, index=True, ondelete="CASCADE"
+    )
+    skipped_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    suspended_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    # why it was suspended (a grade.SUSPEND_REASONS key) and the user's own
+    # words: kept for regenerating the question
+    reason: Optional[str] = Field(default=None)
+    note: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+
 class ReviewLog(SQLModel, table=True):
     """One row per graded answer. ReviewState keeps only the latest answer,
     so history (streaks, accuracy) is read from here."""

@@ -35,4 +35,7 @@
   <p class="actions"><a href="/stats">See your stats</a> <a href="/">Browse courses</a></p>
 </div>
 {% endif %}
+{% if suspended_count %}
+<p class="section-note suspended-link"><a href="/review/suspended">{{ suspended_count }} suspended question{% if suspended_count != 1 %}s{% endif %}</a></p>
+{% endif %}
 {% endblock %}

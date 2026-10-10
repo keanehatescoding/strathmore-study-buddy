@@ -29,13 +29,19 @@ from app.db import get_session
 from app.extract import is_cap_note
 from app.grade import (
     MAX_ANSWER_CHARS,
+    MAX_NOTE_CHARS,
+    SUSPEND_REASONS,
     InvalidAnswer,
     NotDue,
     correct_mcq_index,
     due_count,
     due_items,
     mcq_index,
+    restore_item,
+    skip_item,
     submit_answer,
+    suspend_item,
+    suspended_items,
     user_owns_item,
 )
 from app.llm import LLMClient, LLMError
@@ -609,11 +615,16 @@ def review_queue(
     session: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
+    return _queue_page(request, session, user, due_items(session, user.id))
+
+
+def _queue_page(request: Request, session: Session, user: User, items: list):
     return templates.TemplateResponse(
         request,
         "review.html",
         {
-            "items": due_items(session, user.id),
+            "items": items,
+            "suspended_count": len(suspended_items(session, user.id)),
             "active_page": "review",
         },
     )
@@ -637,6 +648,8 @@ def _take_page(
             "error": None,
             "answer": "",
             "max_answer_chars": MAX_ANSWER_CHARS,
+            "suspend_reasons": SUSPEND_REASONS,
+            "max_note_chars": MAX_NOTE_CHARS,
             "csrf_token": csrf_token(request),
             "active_page": "review",
         } | ctx,
@@ -652,10 +665,72 @@ def review_take(
 ):
     queue = due_items(session, user.id)
     if not queue:
-        return templates.TemplateResponse(
-            request, "review.html", {"items": [], "active_page": "review"}
-        )
+        return _queue_page(request, session, user, [])
     return _take_page(request, session, user, queue[0])
+
+
+@app.get("/review/suspended", response_class=HTMLResponse)
+def review_suspended(
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    return templates.TemplateResponse(
+        request,
+        "suspended.html",
+        {
+            "suspended": suspended_items(session, user.id),
+            "reasons": SUSPEND_REASONS,
+            "csrf_token": csrf_token(request),
+            "active_page": "review",
+        },
+    )
+
+
+def _flag_owned_item(session: Session, user: User, item_id: UUID, change, *args) -> None:
+    """Apply a grade.*_item change to one of the user's own items, else 404."""
+    item = session.get(QuizItem, item_id)
+    if item is None or not user_owns_item(session, user.id, item_id):
+        raise HTTPException(404, "quiz item not found")
+    change(session, user.id, item.id, *args)
+
+
+@app.post("/review/{item_id}/skip")
+async def review_skip(
+    item_id: UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    await checked_form(request)
+    await run_in_threadpool(_flag_owned_item, session, user, item_id, skip_item)
+    return RedirectResponse("/review/take", status_code=303)
+
+
+@app.post("/review/{item_id}/suspend")
+async def review_suspend(
+    item_id: UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    form = await checked_form(request)
+    reason, note = str(form.get("reason", "")), str(form.get("note", ""))
+    await run_in_threadpool(
+        _flag_owned_item, session, user, item_id, suspend_item, reason, note)
+    return RedirectResponse("/review/take", status_code=303)
+
+
+@app.post("/review/{item_id}/restore")
+async def review_restore(
+    item_id: UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    await checked_form(request)
+    await run_in_threadpool(_flag_owned_item, session, user, item_id, restore_item)
+    return RedirectResponse("/review/suspended", status_code=303)
 
 
 def _result_path(item: QuizItem) -> str:

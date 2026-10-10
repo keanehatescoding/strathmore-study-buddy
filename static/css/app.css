@@ -462,6 +462,25 @@ small, .muted { color: var(--ink-soft); }
 }
 .answer-help { font-size: 0.85rem; color: var(--ink-faint); margin: 0.4rem 0 1.5rem; }
 
+/* Reporting a bad question */
+.report { margin-top: 2rem; }
+.report summary { cursor: pointer; color: var(--ink-soft); font-size: 0.9rem; }
+.report-form { display: grid; gap: 0.4rem; max-width: 30rem; margin-top: 0.75rem; }
+.report-form label { font-size: 0.9rem; margin-top: 0.4rem; }
+.report-form .optional { color: var(--ink-faint); }
+.report-form select, .report-form textarea {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-raised);
+  color: var(--ink);
+}
+.report-form .actions { margin-top: 0.5rem; }
+.suspended-link { margin-top: 1.5rem; }
+.suspended .question, .suspended .when { display: block; }
+.suspended .when { color: var(--ink-soft); font-size: 0.9rem; }
+
 .answers { display: grid; gap: 1rem; margin-bottom: 1.5rem; }
 .answer-block h3 {
   font-family: var(--sans);

@@ -239,6 +239,8 @@ small, .muted { color: var(--ink-soft); }
   color: var(--accent-ink);
 }
 .btn-primary:hover { border-color: var(--accent); filter: brightness(1.08); }
+.btn-danger { border-color: var(--bad); color: var(--bad); }
+.btn-danger:hover { border-color: var(--bad); background: var(--bad-wash); }
 .btn-small { font-size: 0.85rem; padding: 0.35rem 0.7rem; }
 .btn.is-done { border-color: var(--good); color: var(--good); }
 

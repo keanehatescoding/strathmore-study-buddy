@@ -191,6 +191,11 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   Logging out ends the session server-side, so a copied cookie stops
   working too; `python -m app.admin_cli revoke-sessions EMAIL` signs an
   account out on every device (e.g. after a lost laptop).
+- A student can delete their account under Settings: their Google grant is
+  revoked and their keys, courses, questions, review history and queued
+  jobs are deleted (other students' copies of the same material stay).
+  `python -m app.admin_cli delete-user EMAIL` does the same on request.
+  Neither touches `ALLOWED_EMAILS`: signing in again starts an empty account.
 - Moodle password sign-in (`/settings/moodle`) is limited to 5 attempts per
   15 minutes per account and per Moodle username, so it can't be used to
   guess another student's password. Like the POST limit, it is per-process.

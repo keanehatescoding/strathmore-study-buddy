@@ -135,4 +135,21 @@
     <button type="submit" class="btn btn-primary">Save</button>
   </form>
 </section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Delete account</h2></div>
+  <p>
+    Deletes your account and everything kept for it: your Moodle and Google keys, synced
+    courses and their questions, your review history and streak. Google access is revoked.
+    This can't be undone; signing in again starts an empty account.
+  </p>
+  <form method="post" action="/settings/account/delete" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="confirm-email">Type <strong>{{ email }}</strong> to confirm</label>
+      <input class="text-input" id="confirm-email" name="confirm_email" type="email" spellcheck="false" required>
+    </div>
+    <button type="submit" class="btn btn-danger">Delete my account</button>
+  </form>
+</section>
 {% endblock %}

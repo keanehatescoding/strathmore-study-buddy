@@ -59,6 +59,8 @@ PIPELINE_SLICE = timedelta(minutes=10)
 # A student can ask for a sync by hand ("Sync now") this often.
 MANUAL_SYNC_EVERY = timedelta(minutes=10)
 
+SOURCES = ("moodle", "classroom")
+
 
 class Defer(Exception):
     """Raised by a handler that can't run yet (e.g. a lock is taken): the
@@ -167,7 +169,15 @@ def _user_syncs(session: Session, user: User) -> list[Job]:
 def _connected_sources(user: User) -> list[str]:
     from app.sync_cli import has_credentials
 
-    return [source for source in ("moodle", "classroom") if has_credentials(source, user)]
+    return [source for source in SOURCES if has_credentials(source, user)]
+
+
+def sync_lock(source: str, user_email: str, bind):
+    """Yield whether this process holds the user's `source` sync: taken by a
+    running sync job, and by whatever must not overlap one (app.account)."""
+    from app.pipeline import advisory_lock
+
+    return advisory_lock(f"app.sync:{source}:{user_email}", bind)
 
 
 def request_sync(session: Session, user: User,
@@ -418,10 +428,7 @@ def run_sync_job(session: Session, payload: dict) -> dict:
     another sync of the user's source runs: two syncs racing each other can
     commit an older snapshot last and purge quiz items, review schedules
     with them."""
-    from app.pipeline import advisory_lock
-
-    name = f"app.sync:{payload['source']}:{payload['user_email']}"
-    with advisory_lock(name, session.get_bind()) as got:
+    with sync_lock(payload["source"], payload["user_email"], session.get_bind()) as got:
         if not got:
             raise Defer(SYNC_BUSY_RETRY, "another sync of this source and user is running")
         return _sync(session, payload)

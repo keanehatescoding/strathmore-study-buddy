@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
+from app import account
 from app import auth as auth_mod
 from app.config import running_commit, settings
 from app.db import get_session
@@ -938,6 +939,7 @@ def moodle_settings(
             "timezones": TIMEZONES,
             "user_timezone": settings.zone(user.timezone).key,
             "notify_email": user.notify_email,
+            "email": user.email,
             "flash": request.session.pop("flash", None),
             "csrf_token": csrf_token(request),
             "active_page": "settings",
@@ -1143,3 +1145,33 @@ async def google_disconnect(
         _flash(request, "error", "We've deleted your Google key, but couldn't reach Google "
                "to revoke it. Remove Study Buddy at myaccount.google.com/permissions.")
     return RedirectResponse("/settings/moodle", status_code=303)
+
+
+@app.post("/settings/account/delete")
+async def delete_account(
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    form = await checked_form(request)
+    # typed out, so a stray click or a replayed form can't delete anything
+    typed = auth_mod.normalize_email(str(form.get("confirm_email", "")))
+    if typed != auth_mod.normalize_email(user.email):
+        _flash(request, "error", "That isn't this account's email address. "
+               "Nothing was deleted.")
+        return RedirectResponse("/settings/moodle", status_code=303)
+    try:
+        revoked = await run_in_threadpool(account.delete_account, session, user)
+    except account.SyncRunning:
+        _flash(request, "error", "Your courses are syncing right now. Nothing was "
+               "deleted; try again in a few minutes.")
+        return RedirectResponse("/settings/moodle", status_code=303)
+    request.session.clear()
+    if revoked:
+        _flash(request, "success", "Your account and everything synced for it "
+               "have been deleted.")
+    else:
+        _flash(request, "warning", "Your account and everything synced for it have been "
+               "deleted, but we couldn't reach Google to revoke access. Remove Study "
+               "Buddy at myaccount.google.com/permissions.")
+    return RedirectResponse("/login", status_code=303)

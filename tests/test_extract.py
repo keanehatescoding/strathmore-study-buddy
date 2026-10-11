@@ -5,6 +5,7 @@ import codecs
 import gzip
 import io
 import struct
+import time
 import zipfile
 from pathlib import Path
 
@@ -298,6 +299,16 @@ def test_doc_pieces_are_joined_in_character_order_and_tidied(monkeypatch):
     text = _doc(monkeypatch, body + footnotes, sum(len(t) for t, _ in body))
     assert text == ("Café “quoted”\nsofthy-phen\nline\nहिन्दी link\n"
                     "a | b\nc\n\nend")
+
+
+def test_doc_unclosed_fields_dont_make_field_removal_quadratic():
+    # 200k fields past their separator and never closed, then as much text:
+    # hours if each kept character rescans the open fields
+    n = 200_000
+    text = "\x13\x14" * n + "x" * n + "\x13code\x14shown\x15\x15\x14y"
+    start = time.monotonic()
+    assert legacy._drop_field_codes(text) == "x" * n + "showny"
+    assert time.monotonic() - start < 5
 
 
 def test_doc_too_old_or_password_protected_is_refused(monkeypatch):

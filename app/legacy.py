@@ -223,16 +223,19 @@ def _drop_field_codes(text: str) -> str:
     PAGEREF codes sit in the text between \\x13 and \\x14."""
     out: list[str] = []
     in_code: list[bool] = []  # one entry per open field
+    code_depth = 0  # open fields still in their instructions
     for ch in text:
         if ch == _FIELD_BEGIN:
             in_code.append(True)
+            code_depth += 1
         elif ch == _FIELD_SEPARATOR:
-            if in_code:
+            if in_code and in_code[-1]:
                 in_code[-1] = False
+                code_depth -= 1
         elif ch == _FIELD_END:
-            if in_code:
-                in_code.pop()
-        elif not any(in_code):
+            if in_code and in_code.pop():
+                code_depth -= 1
+        elif not code_depth:
             out.append(ch)
     return "".join(out)
 

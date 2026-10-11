@@ -133,8 +133,12 @@ def revoke_google_token(token: str | None) -> bool:
         with urllib.request.urlopen(req, timeout=30):
             pass
     except urllib.error.HTTPError as e:
-        # 400 invalid_token: already revoked or expired, so it's gone
-        return e.code == 400
+        # invalid_token: already revoked or expired, so it's gone. Any other
+        # error (invalid_request, a 5xx) revoked nothing.
+        try:
+            return json.loads(e.read()).get("error") == "invalid_token"
+        except Exception:
+            return False
     except Exception:
         return False
     return True

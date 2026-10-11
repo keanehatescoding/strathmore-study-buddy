@@ -210,9 +210,9 @@ def test_delete_account_waits_for_a_running_sync(session, google, monkeypatch, b
 
 
 def test_sync_job_and_deletion_share_a_lock(session, monkeypatch):
-    """The sync handler must take the lock deletion checks, or a sync could
-    write courses for a user being deleted."""
-    from app import jobs
+    """The sync handler and the CLI's inline sync must take the lock deletion
+    checks, or a sync could write courses for a user being deleted."""
+    from app import jobs, sync_cli
 
     names = []
 
@@ -225,9 +225,13 @@ def test_sync_job_and_deletion_share_a_lock(session, monkeypatch):
     user = _add(session, User(email="leaver@x.edu"))
     with pytest.raises(jobs.Defer):
         jobs.run_sync_job(session, {"source": "moodle", "user_email": user.email})
+    monkeypatch.setattr(sync_cli, "build_adapter",
+                        lambda *a: pytest.fail("synced without the lock"))
+    with pytest.raises(sync_cli.SyncBusyError):
+        sync_cli._sync_inline(session, "moodle", user, None)
     with pytest.raises(account.SyncRunning):
         account.delete_account(session, user)
-    assert names == ["app.sync:moodle:leaver@x.edu"] * 2
+    assert names == ["app.sync:moodle:leaver@x.edu"] * 3
 
 
 # -- Settings -> Delete account ------------------------------------------

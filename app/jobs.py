@@ -174,7 +174,8 @@ def _connected_sources(user: User) -> list[str]:
 
 def sync_lock(source: str, user_email: str, bind):
     """Yield whether this process holds the user's `source` sync: taken by a
-    running sync job, and by whatever must not overlap one (app.account)."""
+    running sync, queued or inline (sync_cli), and by whatever must not
+    overlap one (app.account)."""
     from app.pipeline import advisory_lock
 
     return advisory_lock(f"app.sync:{source}:{user_email}", bind)

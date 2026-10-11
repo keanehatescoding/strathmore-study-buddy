@@ -803,16 +803,21 @@ def _user_with_google_token(s):
 
 
 @pytest.mark.parametrize("outcome, revoked", [
-    ("ok", True), ("invalid_token", True), ("unreachable", False)])
+    ("ok", True), ("invalid_token", True), ("invalid_request", False),
+    ("no_body", False), ("unreachable", False)])
 def test_revoke_google_access_always_forgets_the_token(monkeypatch, outcome, revoked):
+    import io
     import urllib.error
 
     sent = []
 
     def fake_urlopen(req, timeout):
         sent.append((req.full_url, req.data))
-        if outcome == "invalid_token":
-            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, None)
+        if outcome in ("invalid_token", "invalid_request"):
+            body = io.BytesIO(b'{"error": "%s"}' % outcome.encode())
+            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, body)
+        if outcome == "no_body":
+            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, io.BytesIO(b"oops"))
         if outcome == "unreachable":
             raise urllib.error.URLError("down")
         return _Resp()

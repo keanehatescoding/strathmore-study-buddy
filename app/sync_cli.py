@@ -23,6 +23,10 @@ class NotConnectedError(RuntimeError):
     """The user has no credentials for this source (a job failure, not a crash)."""
 
 
+class SyncBusyError(RuntimeError):
+    """Another sync of the user's source, or their account's deletion, is running."""
+
+
 def build_adapter(source: str, user: User):
     if source == "moodle":
         from app.moodle import MoodleAdapter, MoodleClient
@@ -113,24 +117,32 @@ def main() -> None:
 
         try:
             _sync_inline(session, args.source, user, args.course)
-        except NotConnectedError as e:
+        except (NotConnectedError, SyncBusyError) as e:
             raise SystemExit(str(e)) from None
 
 
 def _sync_inline(session, source: str, user: User, course: str | None) -> None:
+    """Sync now, in this process, under the lock a queued sync of the same
+    user and source takes (jobs.run_sync_job): racing one, or the account's
+    deletion (app.account), is refused rather than waited out."""
+    from app.jobs import sync_lock
     from app.sync import failed_courses, sync_all, sync_course
 
-    adapter = build_adapter(source, user)
-    if course:
-        stats = sync_course(session, adapter, course, user.id)
-        print(user.email, course, stats.as_dict())
-        return
-    results = sync_all(session, adapter, user.id)
-    for course_id, stats in results.items():
-        print(user.email, course_id, stats.as_dict())
-    failed = failed_courses(results)
-    if results and len(failed) == len(results):
-        raise RuntimeError(f"every course failed, e.g. {results[failed[0]].error}")
+    with sync_lock(source, user.email, session.get_bind()) as got:
+        if not got:
+            raise SyncBusyError(
+                f"another {source} sync for {user.email} is running; try again shortly")
+        adapter = build_adapter(source, user)
+        if course:
+            stats = sync_course(session, adapter, course, user.id)
+            print(user.email, course, stats.as_dict())
+            return
+        results = sync_all(session, adapter, user.id)
+        for course_id, stats in results.items():
+            print(user.email, course_id, stats.as_dict())
+        failed = failed_courses(results)
+        if results and len(failed) == len(results):
+            raise RuntimeError(f"every course failed, e.g. {results[failed[0]].error}")
 
 
 if __name__ == "__main__":

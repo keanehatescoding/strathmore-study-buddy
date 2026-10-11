@@ -24,6 +24,7 @@ dependencies = [
     "fonttools>=4.0",  # pypdf needs it to decode CFF Type1 fonts (math symbols)
     "python-pptx>=1.0",
     "python-docx>=1.1",
+    "olefile>=0.47",  # legacy .ppt/.doc containers; see app/legacy.py
     "youtube-transcript-api>=1.2,<1.3",  # fetch()/list() API; see extract.py
     "tzdata",  # zoneinfo data for TIMEZONE where the OS has none (slim images)
 ]

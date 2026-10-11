@@ -150,6 +150,38 @@ def test_0010_requeues_only_drive_files_that_lacked_the_scope(engine):
     assert got == {str(i): row[3] for i, row in enumerate(rows)}
 
 
+def test_0024_requeues_legacy_office_files_that_were_unsupported(engine):
+    m = _migration("0024_retry_legacy_office")
+    ppt = "unsupported type (mime=application/vnd.ms-powerpoint, file=Lecture 6 - RADIUS.ppt)"
+    rows = [  # (type, status, error) -> expected (status, attempts) after upgrade
+        ("file", "failed", ppt, ("pending", 0)),
+        ("file", "failed", "unsupported type (mime=application/msword, file=A.doc)",
+         ("pending", 0)),
+        ("file", "failed", "unsupported type (mime=application/octet-stream, file=B.PPT)",
+         ("pending", 0)),
+        ("file", "failed", "unsupported type (mime=?, file=notes.rtf)", ("pending", 0)),
+        ("file", "failed", "unsupported type (mime=application/x-tar, file=BindDNS.tar)",
+         ("failed", 2)),
+        ("file", "failed", "PDF has no extractable text (scanned images?)", ("failed", 2)),
+        ("file", "skipped", ppt, ("skipped", 2)),
+        ("link", "failed", ppt, ("failed", 2)),
+    ]
+    with engine.begin() as c:
+        for i, (kind, status, error, _) in enumerate(rows):
+            c.execute(text(
+                "INSERT INTO resources (id, topic_id, source, source_id, type, title, status, "
+                "error, attempts, retry_after) VALUES (:i, :t, 'moodle', :sid, :k, 'R', :st, "
+                ":e, 2, '2026-10-01 00:00:00')"),
+                {"i": uuid.uuid4().hex, "t": uuid.uuid4().hex, "sid": str(i), "k": kind,
+                 "st": status, "e": error})
+    _run(engine, m.upgrade)
+    with engine.connect() as c:
+        got = {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(text(
+            "SELECT source_id, status, attempts, error, retry_after FROM resources"))}
+    assert {k: v[:2] for k, v in got.items()} == {str(i): r[3] for i, r in enumerate(rows)}
+    assert got["0"][2:] == (None, None) and got["4"][2] == rows[4][2]
+
+
 def test_0011_adds_retry_columns_and_requeues_empty_chunkings(engine):
     m = _migration("0011_pipeline_retries")
     with engine.begin() as c:  # the schema as of 0010

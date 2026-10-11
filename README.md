@@ -13,8 +13,8 @@ Moodle / Classroom → sync → extract text → LLM chunking → quiz generatio
 - **Ingestion**: Moodle web-services API (token auth) and Google Classroom
   (OAuth2), diff-based sync — new resources, changed content re-queued,
   unchanged skipped by SHA256.
-- **Extraction**: PDF, PPTX, DOCX, page text; YouTube transcripts where
-  available. Unusable content is marked `skipped`, never silently stuck.
+- **Extraction**: PDF, PPTX, DOCX, legacy PPT/DOC and RTF, page text;
+  YouTube transcripts where available. Unusable content is marked `skipped`, never silently stuck.
 - **Chunking**: LLM semantic chunking into single-concept chunks with
   source offsets for a future "show source" UI.
 - **Quizzes**: 2–4 grounded items per chunk (MCQ + short-answer), difficulty

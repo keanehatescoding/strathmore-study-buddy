@@ -1,12 +1,17 @@
-"""Extraction hardening: text decoding, HTML, zip bombs, YouTube ids, size caps."""
+"""Extraction hardening: text decoding, HTML, zip bombs, YouTube ids, size caps,
+legacy Office files."""
 
 import codecs
+import gzip
 import io
+import struct
+import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
-from app import extract
+from app import extract, legacy
 from app.extract import (
     ExtractError,
     decode_text,
@@ -79,6 +84,238 @@ def test_zip_with_too_many_members_is_refused(monkeypatch):
 def test_non_zip_docx_is_an_extract_error():
     with pytest.raises(ExtractError, match="not a valid file"):
         extract_docx(b"not a zip")
+
+
+def _fixture(name: str) -> bytes:
+    """A file LibreOffice saved in the 97-2003 format, gzipped in the repo."""
+    return gzip.decompress((Path(__file__).parent / "fixtures" / f"{name}.gz").read_bytes())
+
+
+PPT_TEXT = ("--- Slide 1 ---\nDomain Name System\nDNS maps names to addresses\n"
+            "Resolvers ask the root servers first\n\n"
+            "--- Slide 2 ---\nRecord types\nA records hold IPv4 addresses\n"
+            "MX records name mail exchangers – café")  # slide 3 has no text
+DOC_TEXT = ("Indus Valley Civilization\nThe civilization flourished around 2500 BCE.\n"
+            "Harappa and Mohenjo-daro were its largest cities – café.\n"
+            "Period | Dates\nVedic | 1500 BCE")
+
+
+@pytest.mark.parametrize("mime, name", [
+    ("application/vnd.ms-powerpoint", "x"), (None, "Lecture%202.PPT"),
+    ("application/octet-stream", "show.pps"),
+])
+def test_legacy_ppt_extracts_slide_text(mime, name):
+    assert extract_bytes(_fixture("legacy.ppt"), mime, name) == PPT_TEXT
+
+
+@pytest.mark.parametrize("mime, name", [("application/msword", "x"), (None, "essay.DOC")])
+def test_legacy_doc_extracts_body_text_and_tables(mime, name):
+    assert extract_bytes(_fixture("legacy.doc"), mime, name) == DOC_TEXT
+
+
+def test_rtf_saved_as_doc_is_read():
+    rtf = (rb"{\rtf1\ansi\ansicpg1252\uc1{\fonttbl{\f0 Arial;}}{\*\generator Word;}"
+           rb"{\info{\title Hidden}}\pard Caf\'e9 \u8211?dash \u-10179?\u-8704? {\b bold}\par"
+           b"\r\n"
+           rb"{\field{\*\fldinst HYPERLINK \\l x}{\fldrslt link}}\par "
+           rb"a\cell b\cell\row{\pict\bin4 }{}{}\}\{\\\par}")
+    expected = "Café –dash \U0001f600 bold\nlink\na | b\n}{\\"
+    assert extract_bytes(rtf, "application/msword", "notes.doc") == expected
+    assert extract_bytes(rtf, "text/rtf", "x") == expected
+    assert extract_bytes(rtf, None, "notes.rtf") == expected
+
+
+def test_office_xml_under_a_legacy_name_goes_to_the_xml_reader(monkeypatch):
+    monkeypatch.setattr(extract, "extract_pptx", lambda blob: "pptx")
+    monkeypatch.setattr(extract, "extract_docx", lambda blob: "docx")
+    blob = _zip({"[Content_Types].xml": b""})
+    assert extract_bytes(blob, "application/vnd.ms-powerpoint", "a.ppt") == "pptx"
+    assert extract_bytes(blob, "application/msword", "a.doc") == "docx"
+
+
+@pytest.mark.parametrize("name, kind", [("a.ppt", "PPT"), ("a.doc", "DOC")])
+def test_broken_legacy_files_are_extract_errors(name, kind):
+    blobs = [b"not an office file", legacy.OLE_MAGIC + b"\0" * 600,
+             _fixture("legacy.ppt")[:4096], _fixture("legacy.doc")[:4096]]
+    for blob in blobs:
+        with pytest.raises(ExtractError, match=f"{kind} can't be read"):
+            extract_bytes(blob, None, name)
+
+
+def test_a_doc_is_not_a_ppt_and_the_other_way_round():
+    with pytest.raises(ExtractError, match="no 'PowerPoint Document' stream"):
+        extract_bytes(_fixture("legacy.doc"), None, "a.ppt")
+    with pytest.raises(ExtractError, match="no 'WordDocument' stream"):
+        extract_bytes(_fixture("legacy.ppt"), None, "a.doc")
+
+
+def test_legacy_files_with_no_text_are_extract_errors(monkeypatch):
+    monkeypatch.setattr(legacy, "ppt_slides", lambda blob: ["", ""])
+    monkeypatch.setattr(legacy, "doc_text", lambda blob: "")
+    with pytest.raises(ExtractError, match="PPT has no extractable text"):
+        extract_bytes(b"x", None, "a.ppt")
+    with pytest.raises(ExtractError, match="DOC has no extractable text"):
+        extract_bytes(b"x", None, "a.doc")
+
+
+def _rec(rec_type: int, body: bytes, ver: int = 0, instance: int = 0) -> bytes:
+    return struct.pack("<HHI", ver | instance << 4, rec_type, len(body)) + body
+
+
+def _ppt_stream(saves: list[dict[int, bytes]], doc_id: int = 1) -> tuple[bytes, int]:
+    """A "PowerPoint Document" stream: each save appends its records, a
+    persist directory for them and a UserEditAtom pointing at the save before.
+    Returns (stream, offset of the last UserEditAtom)."""
+    data, last_edit = b"", 0
+    for records in saves:
+        entries = b""
+        for persist_id, record in records.items():
+            entries += struct.pack("<II", persist_id | 1 << 20, len(data))
+            data += record
+        directory = len(data)
+        data += _rec(0x1772, entries)
+        edit = len(data)
+        data += _rec(0x0FF5, struct.pack("<IIIIIII", 0, 0, last_edit, directory, doc_id, 0, 0))
+        last_edit = edit
+    return data, last_edit
+
+
+def _ppt_slides(monkeypatch, data: bytes, edit: int) -> list[str]:
+    streams = {"PowerPoint Document": data,
+               "Current User": _rec(0x0FF6, struct.pack("<III", 0x14, 0xE391C05F, edit))}
+    monkeypatch.setattr(legacy, "_open", lambda blob: io.BytesIO())
+    monkeypatch.setattr(legacy, "_stream", lambda ole, name: streams[name])
+    return legacy.ppt_slides(b"")
+
+
+def test_ppt_placeholder_text_is_read_from_the_outline_in_shape_order(monkeypatch):
+    # what PowerPoint itself writes: title/body text in the document's slide
+    # list, the slide's shapes pointing at it, text boxes carrying their own
+    def header(kind):
+        return _rec(0x0F9F, struct.pack("<I", kind))
+
+    slide_list = _rec(0x0FF0, ver=0xF, body=(
+        _rec(0x03F3, struct.pack("<IIiII", 2, 0, 2, 256, 0))
+        + header(0) + _rec(0x0FA8, b"Title\x0bwrapped")
+        + header(1) + _rec(0x0FA0, "Body – one\rtwo".encode("utf-16-le"))
+        + header(1)  # an empty placeholder still takes an index
+        + header(1) + _rec(0x0FA8, b"*")  # slide number
+        + header(1) + _rec(0x0FA8, b"Unreferenced")
+        + _rec(0x03F3, struct.pack("<IIiII", 3, 0, 0, 257, 0))
+        + header(0) + _rec(0x0FA8, b"Second")))
+    masters = _rec(0x0FF0, ver=0xF, instance=1, body=(
+        _rec(0x03F3, struct.pack("<IIiII", 9, 0, 1, 1, 0))
+        + header(0) + _rec(0x0FA8, b"Click to edit Master title style")))
+    document = _rec(0x03E8, masters + slide_list, ver=0xF)
+
+    def shape(*records):  # SpContainer > ClientTextbox, which isn't flagged a container
+        return _rec(0xF004, _rec(0xF00D, b"".join(records)), ver=0xF)
+
+    def ref(index):
+        return _rec(0x0F9E, struct.pack("<i", index))
+
+    slide = _rec(0x03EE, ver=0xF, body=_rec(0x040C, ver=0xF, body=(
+        shape(ref(0)) + shape(header(4), _rec(0x0FA8, b"Text box")) + shape(ref(1))
+        + shape(ref(2)) + shape(ref(3)) + shape(ref(99)))))
+    data, edit = _ppt_stream([{1: document, 2: slide}])  # slide 3's record is missing
+    assert _ppt_slides(monkeypatch, data, edit) == [
+        "Title\nwrapped\nText box\nBody – one\ntwo\nUnreferenced", "Second"]
+
+
+def test_ppt_saved_twice_reads_the_newest_copy_of_each_slide(monkeypatch):
+    def document(*slide_ids):
+        return _rec(0x03E8, ver=0xF, body=_rec(0x0FF0, ver=0xF, body=b"".join(
+            _rec(0x03F3, struct.pack("<IIiII", i, 0, 0, 256, 0)) for i in slide_ids)))
+
+    def slide(text):
+        return _rec(0x03EE, _rec(0xF00D, _rec(0x0FA8, text)), ver=0xF)
+
+    data, edit = _ppt_stream([
+        {1: document(2), 2: slide(b"draft"), 3: slide(b"deleted later")},
+        {1: document(2, 4), 2: slide(b"final"), 4: slide(b"added")},
+    ])
+    assert _ppt_slides(monkeypatch, data, edit) == ["final", "added"]
+
+
+def test_ppt_password_protected_or_looping_is_refused(monkeypatch):
+    data, edit = _ppt_stream([{1: _rec(0x03E8, b"", ver=0xF)}])
+    streams = {"PowerPoint Document": data,
+               "Current User": _rec(0x0FF6, struct.pack("<III", 0x14, 0xF3D1C4DF, edit))}
+    monkeypatch.setattr(legacy, "_open", lambda blob: io.BytesIO())
+    monkeypatch.setattr(legacy, "_stream", lambda ole, name: streams[name])
+    with pytest.raises(ValueError, match="password-protected"):
+        legacy.ppt_slides(b"")
+    # a UserEditAtom whose "previous save" is itself must not loop forever
+    loop = _rec(0x1772, b"") + _rec(0x0FF5, struct.pack("<IIIIIII", 0, 0, 8, 0, 1, 0, 0))
+    with pytest.raises(ValueError, match="no document record"):
+        _ppt_slides(monkeypatch, loop, 8)
+
+
+def test_ppt_records_nested_past_the_limit_are_refused(monkeypatch):
+    nested = _rec(0x0FA8, b"deep")
+    for _ in range(legacy.MAX_DEPTH + 2):
+        nested = _rec(0xF003, nested, ver=0xF)
+    document = _rec(0x03E8, ver=0xF, body=_rec(0x0FF0, ver=0xF, body=_rec(
+        0x03F3, struct.pack("<IIiII", 2, 0, 0, 256, 0))))
+    data, edit = _ppt_stream([{1: document, 2: _rec(0x03EE, nested, ver=0xF)}])
+    with pytest.raises(ValueError, match="nested too deep"):
+        _ppt_slides(monkeypatch, data, edit)
+
+
+def _doc(monkeypatch, pieces: list[tuple[str, bool]], body_chars: int, flags: int = 0x0200,
+         ident: int = 0xA5EC) -> str:
+    """A WordDocument + table stream holding `pieces` ((text, 8-bit?)) stored
+    in reverse order, as a fast-saved file may."""
+    word = bytearray(0x400)
+    struct.pack_into("<H", word, 0, ident)
+    struct.pack_into("<H", word, 0x0A, flags)
+    struct.pack_into("<i", word, 0x4C, body_chars)
+    cps, pcds, cp = [0], b"", 0
+    stored = {}
+    for text, compressed in reversed(pieces):
+        stored[text] = len(word)
+        word += text.encode("latin-1" if compressed else "utf-16-le")
+    for text, compressed in pieces:
+        cp += len(text)
+        cps.append(cp)
+        fc = stored[text] * 2 | 0x40000000 if compressed else stored[text]
+        pcds += struct.pack("<HIH", 0, fc, 0)
+    plc = struct.pack(f"<{len(cps)}I", *cps) + pcds
+    table = b"\xff" * 7 + b"\x01" + struct.pack("<H", 3) + b"abc" \
+        + b"\x02" + struct.pack("<I", len(plc)) + plc
+    struct.pack_into("<II", word, 0x1A2, 7, len(table) - 7)
+    streams = {"WordDocument": bytes(word), "1Table": table}
+    monkeypatch.setattr(legacy, "_open", lambda blob: io.BytesIO())
+    monkeypatch.setattr(legacy, "_stream", lambda ole, name: streams[name])
+    return legacy.doc_text(b"")
+
+
+def test_doc_pieces_are_joined_in_character_order_and_tidied(monkeypatch):
+    body = [("Caf\xe9 \x93quoted\x94\rsoft\x1fhy\x1ephen\x0bline\x0c", True),
+            ("हिन्दी \x13 HYPERLINK \"http://x\" \x14link\x15\r", False),
+            ("a\x07b\x07\x07\x07c\x07\x07\x01\x08\r", True),
+            ("\x13 PAGE \x13 nested \x14 1\x15\x15end\r", True)]
+    footnotes = [("footnote text\r", True)]
+    text = _doc(monkeypatch, body + footnotes, sum(len(t) for t, _ in body))
+    assert text == ("Café “quoted”\nsofthy-phen\nline\nहिन्दी link\n"
+                    "a | b\nc\n\nend")
+
+
+def test_doc_unclosed_fields_dont_make_field_removal_quadratic():
+    # 200k fields past their separator and never closed, then as much text:
+    # hours if each kept character rescans the open fields
+    n = 200_000
+    text = "\x13\x14" * n + "x" * n + "\x13code\x14shown\x15\x15\x14y"
+    start = time.monotonic()
+    assert legacy._drop_field_codes(text) == "x" * n + "showny"
+    assert time.monotonic() - start < 5
+
+
+def test_doc_too_old_or_password_protected_is_refused(monkeypatch):
+    with pytest.raises(ValueError, match="older than Word 97"):
+        _doc(monkeypatch, [("x", True)], 1, ident=0xA5DC)
+    with pytest.raises(ValueError, match="password-protected"):
+        _doc(monkeypatch, [("x", True)], 1, flags=0x0300)
 
 
 @pytest.mark.parametrize("url, video_id", [

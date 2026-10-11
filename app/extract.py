@@ -15,10 +15,13 @@ from __future__ import annotations
 import codecs
 import io
 import re
+import struct
 import zipfile
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
+
+from app import legacy
 
 # Downloads above this are refused (Content-Length, then a streaming cap).
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
@@ -136,6 +139,43 @@ def extract_docx(blob: bytes) -> str:
     text = "\n\n".join(parts)
     if not text.strip():
         raise ExtractError("DOCX has no extractable text")
+    return text
+
+
+def _legacy(read: Callable[[bytes], "str | list[str]"], blob: bytes, kind: str):
+    try:
+        return read(blob)
+    # TypeError: olefile's, for a directory entry that isn't the stream it claims
+    except (ValueError, OSError, IndexError, TypeError, struct.error) as e:
+        raise ExtractError(f"{kind} can't be read: {e}") from e
+
+
+def _is_zip(blob: bytes) -> bool:
+    return blob.startswith(b"PK\x03\x04")
+
+
+def extract_ppt(blob: bytes) -> str:
+    """Legacy binary PowerPoint (.ppt/.pps), or a PPTX saved under that name."""
+    if _is_zip(blob):
+        return extract_pptx(blob)
+    slides = _legacy(legacy.ppt_slides, blob, "PPT")
+    text = "\n\n".join(f"--- Slide {i} ---\n{t}" for i, t in enumerate(slides, 1) if t)
+    if not text.strip():
+        raise ExtractError("PPT has no extractable text")
+    return text
+
+
+def extract_doc(blob: bytes) -> str:
+    """Legacy binary Word (.doc), or the RTF or DOCX that Word and other
+    tools save under the same name."""
+    if _is_zip(blob):
+        return extract_docx(blob)
+    if blob.startswith(legacy.RTF_MAGIC):
+        text = _legacy(legacy.rtf_text, blob, "RTF")
+    else:
+        text = _legacy(legacy.doc_text, blob, "DOC")
+    if not text.strip():
+        raise ExtractError("DOC has no extractable text")
     return text
 
 
@@ -289,6 +329,10 @@ def extract_bytes(blob: bytes, mime: str | None, filename: str = "") -> str:
         return extract_pptx(blob)
     if "wordprocessing" in mime or name.endswith(".docx"):
         return extract_docx(blob)
+    if "ms-powerpoint" in mime or name.endswith((".ppt", ".pps")):
+        return extract_ppt(blob)
+    if "msword" in mime or "rtf" in mime or name.endswith((".doc", ".rtf")):
+        return extract_doc(blob)
     if "html" in mime or name.endswith((".html", ".htm")):
         return html_to_text(decode_text(blob))
     if mime.startswith("text/") or name.endswith((".txt", ".md", ".csv")):

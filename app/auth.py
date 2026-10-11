@@ -118,28 +118,34 @@ def classroom_token_for(user: User | None) -> str | None:
     return None
 
 
+def revoke_google_token(token: str | None) -> bool:
+    """Ask Google to revoke the grant behind `token`. False when Google
+    couldn't be reached: the grant may still be listed at
+    myaccount.google.com until they remove it there."""
+    if not token:
+        return True
+    req = urllib.request.Request(
+        REVOKE_URL, data=urllib.parse.urlencode({"token": token}).encode(),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30):
+            pass
+    except urllib.error.HTTPError as e:
+        # 400 invalid_token: already revoked or expired, so it's gone
+        return e.code == 400
+    except Exception:
+        return False
+    return True
+
+
 def revoke_google_access(session: Session, user: User) -> bool:
     """Revoke the user's Google grant and forget their refresh token.
 
     The stored token is cleared even when Google can't be reached, so we
-    stop using it either way; returns False then, since the grant may
-    still be listed at myaccount.google.com until they remove it there."""
-    token = refresh_token_for(user)
-    revoked = True
-    if token:
-        req = urllib.request.Request(
-            REVOKE_URL, data=urllib.parse.urlencode({"token": token}).encode(),
-            method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30):
-                pass
-        except urllib.error.HTTPError as e:
-            # 400 invalid_token: already revoked or expired, so it's gone
-            revoked = e.code == 400
-        except Exception:
-            revoked = False
+    stop using it either way; returns False then (see revoke_google_token)."""
+    revoked = revoke_google_token(refresh_token_for(user))
     user.google_refresh_token = None
     session.add(user)
     session.commit()

@@ -13,7 +13,7 @@ from contextlib import ExitStack
 from sqlalchemy import delete, or_
 from sqlmodel import Session, select
 
-from app.auth import revoke_google_access
+from app.auth import refresh_token_for, revoke_google_token
 from app.jobs import SOURCES, sync_lock
 from app.models import (
     Assignment,
@@ -38,23 +38,26 @@ class SyncRunning(RuntimeError):
 
 
 def delete_account(session: Session, user: User) -> bool:
-    """Revoke the user's Google grant and delete them with everything kept
-    for them: tokens, courses and what was built from them, review history,
-    notification events and queued jobs. Their sessions end with the row
+    """Delete the user with everything kept for them: tokens, courses and
+    what was built from them, review history, notification events and queued
+    jobs; then revoke their Google grant. Their sessions end with the row
     (main.current_user). Raises SyncRunning, with nothing deleted, while a
     sync of theirs runs: it would write courses for a user who is gone.
 
+    The grant is revoked only once the rows are gone: a deletion that fails
+    leaves the account as it was, still connected.
+
     Returns whether Google confirmed the revocation (see
-    revoke_google_access); the account is deleted either way."""
+    revoke_google_token); the account is deleted either way."""
     user_id, email = user.id, user.email
+    token = refresh_token_for(user)  # the row it is read from is about to go
     bind = session.get_bind()
     with ExitStack() as locks:
         for source in SOURCES:
             if not locks.enter_context(sync_lock(source, email, bind)):
                 raise SyncRunning(email)
-        revoked = revoke_google_access(session, user)
         _delete_rows(session, user_id, email)
-    return revoked
+    return revoke_google_token(token)
 
 
 def _delete_rows(session: Session, user_id, email: str) -> None:
@@ -63,6 +66,11 @@ def _delete_rows(session: Session, user_id, email: str) -> None:
     resource_ids = select(Resource.id).where(Resource.topic_id.in_(topic_ids))
     chunk_ids = select(Chunk.id).where(Chunk.resource_id.in_(resource_ids))
     item_ids = select(QuizItem.id).where(QuizItem.chunk_id.in_(chunk_ids))
+    # A pipeline run isn't locked out (its lock is per source, held for the
+    # whole cron run) and skips rows that vanish under it. What it may still
+    # insert for this user, e.g. a new-material event, needs the user row:
+    # holding it makes that wait, then fail, instead of failing our delete.
+    session.exec(select(User.id).where(User.id == user_id).with_for_update()).first()
     # children first, explicitly: SQLite doesn't enforce ON DELETE CASCADE
     for stmt in (
         delete(ReviewState).where(or_(ReviewState.user_id == user_id,

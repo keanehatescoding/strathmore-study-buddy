@@ -152,6 +152,36 @@ def test_delete_account_of_a_user_with_nothing(session, google):
     assert session.exec(select(User)).all() == []
 
 
+def test_delete_account_that_fails_leaves_the_grant_alone(session, google, monkeypatch):
+    leaver, _ = _two_users(session)
+    before = _counts(session)
+
+    def fail(session, user_id, email):
+        session.rollback()
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(account, "_delete_rows", fail)
+    with pytest.raises(RuntimeError):
+        account.delete_account(session, leaver)
+    # still an account, so still connected: Google is asked only afterwards
+    assert _counts(session) == before and google["revoked"] == []
+    session.refresh(leaver)
+    assert leaver.google_refresh_token is not None
+
+
+def test_delete_account_revokes_after_the_rows_are_gone(session, google, monkeypatch):
+    leaver, _ = _two_users(session)
+    seen = []
+
+    def revoke(token):
+        seen.append((token, session.exec(select(User.email)).all()))
+        return True
+
+    monkeypatch.setattr(account, "revoke_google_token", revoke)
+    assert account.delete_account(session, leaver) is True
+    assert seen == [("rt-1", ["stayer@x.edu"])]
+
+
 def _busy(monkeypatch, busy_source: str):
     """Make the user's `busy_source` sync look like it is running."""
     asked = []

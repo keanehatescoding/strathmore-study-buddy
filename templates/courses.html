@@ -9,9 +9,24 @@
 </div>
 {% endif %}
 
+{% if flash %}
+<div class="notice notice-{{ flash.kind }}" role="status">{{ flash.text }}</div>
+{% endif %}
+{% if sync_state == "syncing" and (courses or archived) %}
+<div class="notice" role="status">Syncing your courses now. Refresh in a few minutes to see anything new.</div>
+{% endif %}
+
 <div class="section-head">
   <h1 class="flush">Courses</h1>
-  {% if courses %}<span class="aside">{{ courses|length }} course{% if courses|length != 1 %}s{% endif %}</span>{% endif %}
+  <div class="head-actions">
+    {% if courses %}<span class="aside">{{ courses|length }} course{% if courses|length != 1 %}s{% endif %}</span>{% endif %}
+    {% if sync_state not in ("syncing", "disconnected") %}
+    <form method="post" action="/sync">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-small" title="Check Moodle and Classroom for new material">Sync now</button>
+    </form>
+    {% endif %}
+  </div>
 </div>
 
 {% if courses|length > 6 %}
@@ -51,8 +66,8 @@
   {% elif sync_state == "unknown" %}
   <h2>No courses synced yet</h2>
   <p>
-    Your courses will appear after the next daily sync. Check your connections in
-    <a href="/settings/moodle">Settings</a>.
+    Your courses will appear after the next daily sync, or press Sync now. Check your
+    connections in <a href="/settings/moodle">Settings</a>.
   </p>
   {% else %}
   <h2>No courses found</h2>

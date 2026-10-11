@@ -430,11 +430,41 @@ def course_list(
             "courses": courses,
             "archived": [c for c in mine if c.archived],
             "counts": counts,
-            # only needed to explain an empty list
-            "sync_state": None if mine else sync_state(session, user),
+            # explains an empty list; with courses, only "syncing" shows
+            "sync_state": sync_state(session, user),
+            "flash": request.session.pop("flash", None),
+            "csrf_token": csrf_token(request),
             "active_page": "courses",
         },
     )
+
+
+def _request_sync(session: Session, user: User) -> tuple[str, str] | None:
+    """Queue a sync for `user`; returns a (kind, text) flash when nothing
+    was queued and the course list's own sync banner won't say why."""
+    from app.jobs import request_sync
+
+    outcome, wait = request_sync(session, user)
+    if outcome == "disconnected":
+        return "error", "Nothing to sync yet. Connect Moodle or Google Classroom in Settings."
+    if outcome == "wait":
+        minutes = int(wait.total_seconds() // 60) + 1
+        return "warning", ("Your courses were synced a few minutes ago. You can sync "
+                           f"again in {minutes} minute{'' if minutes == 1 else 's'}.")
+    return None
+
+
+@app.post("/sync")
+async def sync_now(
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    await checked_form(request)
+    flash = await run_in_threadpool(_request_sync, session, user)
+    if flash:
+        _flash(request, *flash)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/courses/{course_id}", response_class=HTMLResponse)

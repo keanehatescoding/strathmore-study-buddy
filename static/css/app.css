@@ -208,6 +208,8 @@ small, .muted { color: var(--ink-soft); }
 }
 .section-head h2 { margin: 0; font-size: 1.2rem; }
 .section-head .aside { font-size: 0.85rem; color: var(--ink-faint); }
+.head-actions { display: flex; align-items: baseline; gap: 0.75rem; }
+.head-actions form { margin: 0; }
 .section-note { font-size: 0.9rem; color: var(--ink-soft); }
 
 /* Buttons */

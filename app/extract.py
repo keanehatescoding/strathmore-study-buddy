@@ -17,6 +17,7 @@ import io
 import re
 import struct
 import zipfile
+import zlib
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
@@ -106,6 +107,9 @@ _DOCX_VARIANTS = (
     b"application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
 )
 _CONTENT_TYPES = "[Content_Types].xml"
+# What reading a member raises when its bytes don't match the directory that
+# _check_zip trusted: a bad CRC, or a deflate stream that won't inflate.
+_DAMAGED = (zipfile.BadZipFile, zlib.error)
 
 
 def _as_main_type(blob: bytes, variants: tuple[bytes, ...], main: bytes) -> bytes:
@@ -156,6 +160,8 @@ def extract_pptx(blob: bytes) -> str:
         prs = Presentation(io.BytesIO(_as_main_type(blob, _PPTX_VARIANTS, _PPTX_MAIN)))
     except (KeyError, ValueError) as e:  # a zip, but not a presentation package
         raise ExtractError(f"PPTX is not a PowerPoint file: {_reason(e)}") from e
+    except _DAMAGED as e:
+        raise ExtractError(f"PPTX is damaged: {e}") from e
     slides = []
     for i, slide in enumerate(prs.slides, 1):
         parts = []
@@ -188,6 +194,8 @@ def extract_docx(blob: bytes) -> str:
         doc = Document(io.BytesIO(_as_main_type(blob, _DOCX_VARIANTS, _DOCX_MAIN)))
     except (KeyError, ValueError) as e:  # a zip, but not a Word package
         raise ExtractError(f"DOCX is not a Word file: {_reason(e)}") from e
+    except _DAMAGED as e:
+        raise ExtractError(f"DOCX is damaged: {e}") from e
     parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
     for table in doc.tables:
         for row in table.rows:

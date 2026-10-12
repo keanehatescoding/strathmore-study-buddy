@@ -237,6 +237,34 @@ def test_a_zip_that_is_no_office_package_is_an_extract_error():
     assert "BytesIO" not in str(e.value)
 
 
+def _damaged(blob: bytes, member: str, method: int) -> bytes:
+    """The package with `member`'s bytes garbled under an intact directory."""
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        members = {i.filename: z.read(i) for i in z.infolist()}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", method) as z:
+        for name, data in members.items():
+            z.writestr(name, data)
+        start = z.getinfo(member).header_offset + 30 + len(member.encode())
+    raw = bytearray(buf.getvalue())
+    for i in range(start + 2, start + 12):
+        raw[i] ^= 0xFF
+    return bytes(raw)
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+@pytest.mark.parametrize("make, name, member", [
+    (_pptx, "a.pptx", "[Content_Types].xml"),
+    (_pptx, "a.pptx", "ppt/slides/slide1.xml"),
+    (_docx, "a.docx", "[Content_Types].xml"),
+    (_docx, "a.docx", "word/document.xml"),
+])
+def test_a_package_with_a_damaged_member_is_an_extract_error(make, name, member, method):
+    kind = name[2:].upper()
+    with pytest.raises(ExtractError, match=f"{kind} is damaged"):
+        extract_bytes(_damaged(make(), member, method), None, name)
+
+
 def _pdf(password: str | None = None) -> bytes:
     from pypdf import PdfWriter
 

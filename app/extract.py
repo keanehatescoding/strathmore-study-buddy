@@ -139,8 +139,10 @@ def extract_pdf(blob: bytes) -> str:
     try:
         reader = PdfReader(io.BytesIO(blob))
         pages = [(p.extract_text() or "") for p in reader.pages]
-    except (FileNotDecryptedError, DependencyError) as e:
+    except FileNotDecryptedError as e:
         raise ExtractError("PDF is password-protected") from e
+    except DependencyError as e:
+        raise ExtractError("PDF extraction dependency is unavailable") from e
     except PyPdfError as e:
         raise ExtractError(f"PDF is damaged or incomplete: {e}") from e
     text = "\n\n".join(t.strip() for t in pages if t.strip())

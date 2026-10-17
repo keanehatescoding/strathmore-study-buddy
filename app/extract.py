@@ -373,7 +373,7 @@ class _TextParser(HTMLParser):
         self.skipping: list[str] = []  # open SKIP tags, outermost first
 
     def handle_starttag(self, tag, attrs):
-        if self.skipping == ["head"] and tag not in self.IN_HEAD:
+        if self.skipping and self.skipping[0] == "head" and tag not in self.IN_HEAD:
             self.skipping = []
         if tag in self.skip:
             self.skipping.append(tag)

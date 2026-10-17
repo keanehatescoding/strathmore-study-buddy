@@ -17,6 +17,7 @@ import io
 import re
 import struct
 import zipfile
+import zlib
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
@@ -88,11 +89,62 @@ def _check_zip(blob: bytes, kind: str) -> None:
         )
 
 
+# Slide shows, templates and macro-enabled files are the same packages as
+# PPTX/DOCX under another main content type, which python-pptx and
+# python-docx refuse by name.
+_MAIN = b"application/vnd.openxmlformats-officedocument."
+_PPTX_MAIN = _MAIN + b"presentationml.presentation.main+xml"
+_PPTX_VARIANTS = (
+    _MAIN + b"presentationml.slideshow.main+xml",
+    _MAIN + b"presentationml.template.main+xml",
+    b"application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml",
+    b"application/vnd.ms-powerpoint.template.macroEnabled.main+xml",
+)
+_DOCX_MAIN = _MAIN + b"wordprocessingml.document.main+xml"
+_DOCX_VARIANTS = (
+    _MAIN + b"wordprocessingml.template.main+xml",
+    b"application/vnd.ms-word.document.macroEnabled.main+xml",
+    b"application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+)
+_CONTENT_TYPES = "[Content_Types].xml"
+# What reading a member raises when its bytes don't match the directory that
+# _check_zip trusted: a bad CRC, or a deflate stream that won't inflate.
+_DAMAGED = (zipfile.BadZipFile, zlib.error)
+
+
+def _as_main_type(blob: bytes, variants: tuple[bytes, ...], main: bytes) -> bytes:
+    """The package with a variant main content type renamed to `main`;
+    untouched when it has none. Call after _check_zip."""
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        try:
+            types = z.read(_CONTENT_TYPES)
+        except KeyError:
+            return blob
+        if not any(v in types for v in variants):
+            return blob
+        for v in variants:
+            types = types.replace(v, main)
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as copy:
+            for info in z.infolist():
+                copy.writestr(
+                    info, types if info.filename == _CONTENT_TYPES else z.read(info))
+    return out.getvalue()
+
+
 def extract_pdf(blob: bytes) -> str:
     from pypdf import PdfReader
+    from pypdf.errors import DependencyError, FileNotDecryptedError, PyPdfError
 
-    reader = PdfReader(io.BytesIO(blob))
-    pages = [(p.extract_text() or "") for p in reader.pages]
+    try:
+        reader = PdfReader(io.BytesIO(blob))
+        pages = [(p.extract_text() or "") for p in reader.pages]
+    except FileNotDecryptedError as e:
+        raise ExtractError("PDF is password-protected") from e
+    except DependencyError as e:
+        raise ExtractError("PDF extraction dependency is unavailable") from e
+    except PyPdfError as e:
+        raise ExtractError(f"PDF is damaged or incomplete: {e}") from e
     text = "\n\n".join(t.strip() for t in pages if t.strip())
     if not text.strip():
         raise ExtractError("PDF has no extractable text (scanned images?)")
@@ -100,10 +152,18 @@ def extract_pdf(blob: bytes) -> str:
 
 
 def extract_pptx(blob: bytes) -> str:
+    """PPTX (or .ppsx/.potx/.pptm), or a legacy .ppt saved under that name."""
     from pptx import Presentation
 
+    if _is_ole(blob):
+        return extract_ppt(blob)
     _check_zip(blob, "PPTX")
-    prs = Presentation(io.BytesIO(blob))
+    try:
+        prs = Presentation(io.BytesIO(_as_main_type(blob, _PPTX_VARIANTS, _PPTX_MAIN)))
+    except (KeyError, ValueError) as e:  # a zip, but not a presentation package
+        raise ExtractError(f"PPTX is not a PowerPoint file: {_reason(e)}") from e
+    except _DAMAGED as e:
+        raise ExtractError(f"PPTX is damaged: {e}") from e
     slides = []
     for i, slide in enumerate(prs.slides, 1):
         parts = []
@@ -126,10 +186,18 @@ def extract_pptx(blob: bytes) -> str:
 
 
 def extract_docx(blob: bytes) -> str:
+    """DOCX (or .dotx/.docm), or a legacy .doc or RTF saved under that name."""
     from docx import Document
 
+    if _is_ole(blob) or blob.startswith(legacy.RTF_MAGIC):
+        return extract_doc(blob)
     _check_zip(blob, "DOCX")
-    doc = Document(io.BytesIO(blob))
+    try:
+        doc = Document(io.BytesIO(_as_main_type(blob, _DOCX_VARIANTS, _DOCX_MAIN)))
+    except (KeyError, ValueError) as e:  # a zip, but not a Word package
+        raise ExtractError(f"DOCX is not a Word file: {_reason(e)}") from e
+    except _DAMAGED as e:
+        raise ExtractError(f"DOCX is damaged: {e}") from e
     parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
     for table in doc.tables:
         for row in table.rows:
@@ -152,6 +220,15 @@ def _legacy(read: Callable[[bytes], "str | list[str]"], blob: bytes, kind: str):
 
 def _is_zip(blob: bytes) -> bool:
     return blob.startswith(b"PK\x03\x04")
+
+
+def _is_ole(blob: bytes) -> bool:
+    return blob.startswith(legacy.OLE_MAGIC)
+
+
+def _reason(e: Exception) -> str:
+    """An exception's message without the BytesIO repr python-pptx puts in it."""
+    return re.sub(r"'?<_io\.BytesIO[^>]*>'? ?", "", str(e))[:200]
 
 
 def extract_ppt(blob: bytes) -> str:
@@ -285,26 +362,37 @@ class _TextParser(HTMLParser):
              "article", "header", "footer", "blockquote", "pre", "h1", "h2", "h3",
              "h4", "h5", "h6", "dt", "dd", "figcaption", "title"}
 
-    def __init__(self):
+    # what <head> may hold: any other start tag ends it (</head> is optional)
+    IN_HEAD = {"title", "meta", "link", "base", "script", "style", "noscript",
+               "template"}
+
+    def __init__(self, skip=SKIP):
         super().__init__(convert_charrefs=True)
+        self.skip = skip
         self.parts: list[str] = []
-        self.skipping = 0
+        self.skipping: list[str] = []  # open SKIP tags, outermost first
 
     def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self.skipping += 1
+        if self.skipping and self.skipping[0] == "head" and tag not in self.IN_HEAD:
+            self.skipping = []
+        # title isn't in SKIP, but its text belongs in head until </title>
+        if tag in self.skip or (self.skipping[:1] == ["head"] and tag == "title"):
+            self.skipping.append(tag)
         elif tag in self.BLOCK:
             self.parts.append("\n- " if tag == "li" else "\n")
         elif tag in ("td", "th"):
             self.parts.append(" | ")
 
     def handle_endtag(self, tag):
-        if tag in self.SKIP:
-            self.skipping = max(0, self.skipping - 1)
+        if tag in self.skip or tag == "title":
+            if tag in self.skipping:  # closes whatever was left open inside it
+                del self.skipping[self.skipping.index(tag):]
         elif tag in self.BLOCK and tag != "li":  # the next <li> breaks the line
             self.parts.append("\n")
 
     def handle_data(self, data):
+        if self.skipping == ["head"] and data.strip():
+            self.skipping = []
         if not self.skipping:
             self.parts.append(data)
 
@@ -312,26 +400,41 @@ class _TextParser(HTMLParser):
 def html_to_text(html: str) -> str:
     """Readable text from an HTML page: tags, scripts and styles dropped,
     entities decoded, block elements on their own lines."""
+    html = strip_nul(html)
     parser = _TextParser()
-    parser.feed(strip_nul(html))
+    parser.feed(html)
     parser.close()
+    # A skipped element that never closes would swallow the rest of the page:
+    # read it again with that element's text kept. (html.parser itself takes
+    # an unclosed <script>/<style> to the end of input.)
+    unclosed = set(parser.skipping) - {"script", "style"}
+    if unclosed:
+        parser = _TextParser(_TextParser.SKIP - unclosed)
+        parser.feed(html)
+        parser.close()
     lines = (" ".join(line.split()) for line in "".join(parser.parts).splitlines())
     text = "\n".join(line.removeprefix("| ") for line in lines)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def extract_bytes(blob: bytes, mime: str | None, filename: str = "") -> str:
+    """Text of a downloaded file. The label (mime, then filename) picks the
+    reader, except that a PDF is known by its first bytes whatever it is
+    called; each Office reader likewise hands a file in the other
+    generation's format (or RTF) to the reader for it."""
     name = filename.lower()
     mime = (mime or "").lower()
-    if "pdf" in mime or name.endswith(".pdf"):
+    if blob.startswith(b"%PDF-") or "pdf" in mime or name.endswith(".pdf"):
         return extract_pdf(blob)
-    if "presentation" in mime or name.endswith(".pptx"):
+    # "presentationml", not "presentation": OpenDocument's mime has that too
+    if "presentationml" in mime or name.endswith((".pptx", ".ppsx", ".pptm", ".potx")):
         return extract_pptx(blob)
-    if "wordprocessing" in mime or name.endswith(".docx"):
+    if "wordprocessingml" in mime or name.endswith((".docx", ".docm", ".dotx")):
         return extract_docx(blob)
     if "ms-powerpoint" in mime or name.endswith((".ppt", ".pps")):
         return extract_ppt(blob)
-    if "msword" in mime or "rtf" in mime or name.endswith((".doc", ".rtf")):
+    if ("msword" in mime or "ms-word" in mime or "rtf" in mime
+            or name.endswith((".doc", ".rtf"))):
         return extract_doc(blob)
     if "html" in mime or name.endswith((".html", ".htm")):
         return html_to_text(decode_text(blob))

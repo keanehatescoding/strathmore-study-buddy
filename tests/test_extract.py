@@ -149,6 +149,169 @@ def test_a_doc_is_not_a_ppt_and_the_other_way_round():
         extract_bytes(_fixture("legacy.ppt"), None, "a.doc")
 
 
+def test_legacy_files_under_a_modern_name_go_to_the_legacy_reader():
+    pptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    assert extract_bytes(_fixture("legacy.ppt"), pptx, "x") == PPT_TEXT
+    assert extract_bytes(_fixture("legacy.ppt"), None, "slides.pptx") == PPT_TEXT
+    assert extract_bytes(_fixture("legacy.doc"), None, "essay.docx") == DOC_TEXT
+    assert extract_bytes(rb"{\rtf1 hello\par}", None, "notes.docx") == "hello"
+
+
+def _pptx(main_type: str | None = None) -> bytes:
+    from pptx import Presentation
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    slide.shapes.title.text = "Routing"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return _retyped(buf.getvalue(), b"presentationml.presentation.main+xml", main_type)
+
+
+def _docx(main_type: str | None = None) -> bytes:
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Switching")
+    buf = io.BytesIO()
+    doc.save(buf)
+    return _retyped(buf.getvalue(), b"wordprocessingml.document.main+xml", main_type)
+
+
+def _retyped(blob: bytes, old: bytes, main_type: str | None) -> bytes:
+    """The package with its main part's content type swapped for `main_type`."""
+    if main_type is None:
+        return blob
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        members = {i.filename: z.read(i) for i in z.infolist()}
+    full = b"application/vnd.openxmlformats-officedocument." + old
+    assert full in members["[Content_Types].xml"]
+    members["[Content_Types].xml"] = members["[Content_Types].xml"].replace(
+        full, main_type.encode())
+    return _zip(members)
+
+
+OOXML = "application/vnd.openxmlformats-officedocument."
+
+
+@pytest.mark.parametrize("main_type, mime, name", [
+    (None, "application/octet-stream", "a.pptx"),
+    (OOXML + "presentationml.slideshow.main+xml",
+     OOXML + "presentationml.slideshow", "x"),
+    (OOXML + "presentationml.slideshow.main+xml", "application/octet-stream", "a.PPSX"),
+    (OOXML + "presentationml.template.main+xml", None, "a.potx"),
+    ("application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+     "application/octet-stream", "a.pptm"),
+    ("application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+     "application/vnd.ms-powerpoint.presentation.macroenabled.12", "x"),
+])
+def test_slide_shows_templates_and_macro_files_read_as_pptx(main_type, mime, name):
+    assert extract_bytes(_pptx(main_type), mime, name) == "--- Slide 1 ---\nRouting"
+
+
+@pytest.mark.parametrize("main_type, mime, name", [
+    (None, "application/octet-stream", "a.docx"),
+    ("application/vnd.ms-word.document.macroEnabled.main+xml",
+     "application/octet-stream", "a.docm"),
+    ("application/vnd.ms-word.document.macroEnabled.main+xml",
+     "application/vnd.ms-word.document.macroenabled.12", "x"),
+    (OOXML + "wordprocessingml.template.main+xml", None, "a.dotx"),
+])
+def test_templates_and_macro_files_read_as_docx(main_type, mime, name):
+    assert extract_bytes(_docx(main_type), mime, name) == "Switching"
+
+
+def test_opendocument_files_are_unsupported_not_fed_to_the_pptx_reader():
+    odp = _zip({"content.xml": b"<x/>"})
+    for mime, name in [("application/vnd.oasis.opendocument.presentation", "a.odp"),
+                       ("application/vnd.oasis.opendocument.text", "a.odt")]:
+        with pytest.raises(ExtractError, match="unsupported type"):
+            extract_bytes(odp, mime, name)
+
+
+def test_a_zip_that_is_no_office_package_is_an_extract_error():
+    with pytest.raises(ExtractError, match="PPTX is not a PowerPoint file"):
+        extract_bytes(_zip({"content.xml": b"<x/>"}), None, "a.pptx")
+    with pytest.raises(ExtractError, match="DOCX is not a Word file") as e:
+        extract_bytes(_pptx(), None, "a.docx")
+    assert "BytesIO" not in str(e.value)
+
+
+def _damaged(blob: bytes, member: str, method: int) -> bytes:
+    """The package with `member`'s bytes garbled under an intact directory."""
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        members = {i.filename: z.read(i) for i in z.infolist()}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", method) as z:
+        for name, data in members.items():
+            z.writestr(name, data)
+        start = z.getinfo(member).header_offset + 30 + len(member.encode())
+    raw = bytearray(buf.getvalue())
+    for i in range(start + 2, start + 12):
+        raw[i] ^= 0xFF
+    return bytes(raw)
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+@pytest.mark.parametrize("make, name, member", [
+    (_pptx, "a.pptx", "[Content_Types].xml"),
+    (_pptx, "a.pptx", "ppt/slides/slide1.xml"),
+    (_docx, "a.docx", "[Content_Types].xml"),
+    (_docx, "a.docx", "word/document.xml"),
+])
+def test_a_package_with_a_damaged_member_is_an_extract_error(make, name, member, method):
+    kind = name[2:].upper()
+    with pytest.raises(ExtractError, match=f"{kind} is damaged"):
+        extract_bytes(_damaged(make(), member, method), None, name)
+
+
+def _pdf(password: str | None = None) -> bytes:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(200, 200)
+    if password:
+        writer.encrypt(password)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def test_unreadable_pdfs_are_extract_errors_in_plain_words():
+    with pytest.raises(ExtractError, match="^PDF is password-protected$"):
+        extract_bytes(_pdf("secret"), "application/pdf", "x.pdf")
+    for blob in (b"%PDF-1.4 cut off", b"not a pdf", b""):
+        with pytest.raises(ExtractError, match="PDF is damaged or incomplete"):
+            extract_bytes(blob, "application/pdf", "x.pdf")
+    with pytest.raises(ExtractError, match="no extractable text"):
+        extract_bytes(_pdf(), "application/pdf", "x.pdf")
+
+
+def test_a_pdf_is_known_by_its_first_bytes_whatever_it_is_called(monkeypatch):
+    monkeypatch.setattr(extract, "extract_pdf", lambda blob: "pdf")
+    assert extract_bytes(b"%PDF-1.7 ...", "application/msword", "notes.doc") == "pdf"
+    assert extract_bytes(b"%PDF-1.7 ...", "application/octet-stream", "x") == "pdf"
+
+
+def test_html_without_a_closing_head_tag_keeps_its_body():
+    html = ("<!doctype html><html><head><meta charset=utf-8><title>T</title>"
+            "<style>p{color:red}</style><body><p>hi</p><p>there</p></body></html>")
+    assert html_to_text(html) == "hi\n\nthere"
+    assert html_to_text("<head><title>T</title><p>no body tag</p>") == "no body tag"
+    # a tag <head> may hold doesn't stop it ending at the first tag it may not
+    assert html_to_text("<head><noscript>hidden<p>body") == "body"
+    # non-whitespace after </title> ends an implicit <head>; title text stays skipped
+    assert html_to_text("<head><title>T</title>bare") == "bare"
+    assert html_to_text("<head><title>T</title>hello<p>world") == "hello\nworld"
+
+
+def test_html_with_an_unclosed_skipped_element_keeps_the_rest_of_the_page():
+    assert html_to_text("<p>a</p><noscript><img src=x><p>b</p><p>c</p>") == "a\n\nb\n\nc"
+    # closing the outer element closes what was left open inside it
+    assert html_to_text("<p>a</p><svg><template>x</svg><p>b</p>") == "a\n\nb"
+    assert html_to_text("<p>a</p><script>var b = 1") == "a"
+
+
 def test_legacy_files_with_no_text_are_extract_errors(monkeypatch):
     monkeypatch.setattr(legacy, "ppt_slides", lambda blob: ["", ""])
     monkeypatch.setattr(legacy, "doc_text", lambda blob: "")

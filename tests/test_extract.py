@@ -300,6 +300,9 @@ def test_html_without_a_closing_head_tag_keeps_its_body():
     assert html_to_text("<head><title>T</title><p>no body tag</p>") == "no body tag"
     # a tag <head> may hold doesn't stop it ending at the first tag it may not
     assert html_to_text("<head><noscript>hidden<p>body") == "body"
+    # non-whitespace after </title> ends an implicit <head>; title text stays skipped
+    assert html_to_text("<head><title>T</title>bare") == "bare"
+    assert html_to_text("<head><title>T</title>hello<p>world") == "hello\nworld"
 
 
 def test_html_with_an_unclosed_skipped_element_keeps_the_rest_of_the_page():

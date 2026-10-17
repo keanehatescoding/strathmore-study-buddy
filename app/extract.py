@@ -375,7 +375,8 @@ class _TextParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if self.skipping and self.skipping[0] == "head" and tag not in self.IN_HEAD:
             self.skipping = []
-        if tag in self.skip:
+        # title isn't in SKIP, but its text belongs in head until </title>
+        if tag in self.skip or (self.skipping[:1] == ["head"] and tag == "title"):
             self.skipping.append(tag)
         elif tag in self.BLOCK:
             self.parts.append("\n- " if tag == "li" else "\n")
@@ -383,13 +384,15 @@ class _TextParser(HTMLParser):
             self.parts.append(" | ")
 
     def handle_endtag(self, tag):
-        if tag in self.skip:
+        if tag in self.skip or tag == "title":
             if tag in self.skipping:  # closes whatever was left open inside it
                 del self.skipping[self.skipping.index(tag):]
         elif tag in self.BLOCK and tag != "li":  # the next <li> breaks the line
             self.parts.append("\n")
 
     def handle_data(self, data):
+        if self.skipping == ["head"] and data.strip():
+            self.skipping = []
         if not self.skipping:
             self.parts.append(data)
 

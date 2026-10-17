@@ -107,7 +107,11 @@ class MoodleClient:
         """Download a fileurl. Returns (bytes, mime_type).
 
         Over MAX_DOWNLOAD_BYTES raises ExtractError (permanent): refused on
-        Content-Length when sent, else once the streamed body passes the cap."""
+        Content-Length when sent, else once the streamed body passes the cap.
+
+        A login page is a redirect off pluginfile.php (the HTML body of a real
+        .html file looks the same). A rejected token on pluginfile.php is a
+        JSON error object, not a file."""
         if not self.serves(fileurl):
             raise ForeignURLError(f"refusing to send the Moodle token to {fileurl}")
         sep = "&" if "?" in fileurl else "?"
@@ -115,6 +119,7 @@ class MoodleClient:
         req = urllib.request.Request(url)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                final_url = resp.geturl()
                 mime = resp.headers.get_content_type()
                 length = resp.headers.get("Content-Length", "")
                 if length.isdigit() and int(length) > MAX_DOWNLOAD_BYTES:
@@ -130,11 +135,32 @@ class MoodleClient:
             raise
         except Exception as e:
             raise MoodleError(f"download failed for {fileurl}: {e}") from e
-        if mime == "text/html" and blob.lstrip()[:1] == b"<":
+        if not self.serves(final_url):
             raise MoodleError(
                 f"download returned a login page for {fileurl} — token rejected?"
             )
+        _raise_pluginfile_json_error(blob, mime, fileurl)
         return blob, mime
+
+
+def _raise_pluginfile_json_error(blob: bytes, mime: str | None, fileurl: str) -> None:
+    """Moodle answers a bad pluginfile token with HTTP 200 + JSON.
+
+    Skip when the resource itself is JSON, so a .json file is extracted."""
+    if mime != "application/json":
+        return
+    if urllib.parse.urlsplit(fileurl).path.lower().endswith(".json"):
+        return
+    try:
+        body = json.loads(blob.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if not isinstance(body, dict) or not body.get("errorcode"):
+        return
+    code = body["errorcode"]
+    detail = body.get("message") or body.get("error")
+    error = TokenRejected if code in REJECTED_TOKEN_ERRORS else MoodleError
+    raise error(f"download: {code}: {detail}", errorcode=code)
 
 
 _WS_FILES = "/webservice/pluginfile.php/"

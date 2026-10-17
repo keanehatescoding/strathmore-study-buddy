@@ -20,7 +20,7 @@ from app.extract import (
     html_to_text,
     youtube_video_id,
 )
-from app.moodle import MoodleClient, MoodleError
+from app.moodle import MoodleClient, MoodleError, TokenRejected
 
 
 @pytest.mark.parametrize("blob", [
@@ -506,10 +506,12 @@ def test_youtube_video_id(url, video_id):
 
 
 class _Response:
-    def __init__(self, body: bytes, length: str | None):
+    def __init__(self, body: bytes, length: str | None,
+                 content_type: str = "application/pdf", url: str | None = None):
         self.body = io.BytesIO(body)
         self.reads = 0
-        headers = {"Content-Type": "application/pdf"}
+        self.url = url or "https://m.example/webservice/pluginfile.php/1/a.pdf"
+        headers = {"Content-Type": content_type}
         if length is not None:
             headers["Content-Length"] = length
         from email.message import Message
@@ -517,6 +519,9 @@ class _Response:
         self.headers = Message()
         for k, v in headers.items():
             self.headers[k] = v
+
+    def geturl(self):
+        return self.url
 
     def read(self, n=-1):
         self.reads += 1
@@ -529,12 +534,14 @@ class _Response:
         return False
 
 
-def _download(monkeypatch, response: _Response):
+_PLUGINFILE = "https://m.example/webservice/pluginfile.php/1/a.pdf"
+
+
+def _download(monkeypatch, response: _Response, fileurl: str = _PLUGINFILE):
     import app.moodle as moodle
 
     monkeypatch.setattr(moodle.urllib.request, "urlopen", lambda req, timeout: response)
-    client = MoodleClient("https://m.example", "tok")
-    return client.download("https://m.example/webservice/pluginfile.php/1/a.pdf")
+    return MoodleClient("https://m.example", "tok").download(fileurl)
 
 
 def test_download_refuses_large_content_length_without_reading(monkeypatch):
@@ -570,3 +577,39 @@ def test_download_network_errors_stay_retryable(monkeypatch):
     with pytest.raises(MoodleError):
         MoodleClient("https://m.example", "tok").download(
             "https://m.example/pluginfile.php/1/a.pdf")
+
+
+def test_download_keeps_an_html_file(monkeypatch):
+    html = b"<!doctype html><p>lecture notes</p>"
+    blob, mime = _download(monkeypatch, _Response(html, None, "text/html"))
+    assert (blob, mime) == (html, "text/html")
+
+
+def test_download_treats_a_redirect_off_pluginfile_as_a_login_page(monkeypatch):
+    html = b"<!doctype html><html>log in</html>"
+    response = _Response(html, None, "text/html", url="https://m.example/login/index.php")
+    with pytest.raises(MoodleError, match="login page"):
+        _download(monkeypatch, response)
+
+
+def test_download_json_error_body_is_token_rejected_not_a_failed_pdf(monkeypatch):
+    body = b'{"exception":"moodle_exception","errorcode":"invalidtoken","message":"Invalid token"}'
+    with pytest.raises(TokenRejected) as exc:
+        _download(monkeypatch, _Response(body, None, "application/json"))
+    assert exc.value.errorcode == "invalidtoken"
+
+
+def test_download_json_error_without_invalidtoken_is_retryable(monkeypatch):
+    body = b'{"error":"No file","errorcode":"filenotfound"}'
+    with pytest.raises(MoodleError) as exc:
+        _download(monkeypatch, _Response(body, None, "application/json"))
+    assert not isinstance(exc.value, TokenRejected)
+    assert exc.value.errorcode == "filenotfound"
+
+
+def test_download_keeps_a_json_file_even_when_it_looks_like_an_error(monkeypatch):
+    body = b'{"error":"not moodle","errorcode":"invalidtoken"}'
+    fileurl = "https://m.example/webservice/pluginfile.php/1/notes.json"
+    response = _Response(body, None, "application/json", url=fileurl)
+    blob, mime = _download(monkeypatch, response, fileurl)
+    assert (blob, mime) == (body, "application/json")

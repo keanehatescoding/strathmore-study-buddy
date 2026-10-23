@@ -1,4 +1,4 @@
-"""Admin chores: python -m app.admin_cli {claim-unowned,revoke-sessions,delete-user} EMAIL
+"""Admin chores: python -m app.admin_cli {claim-unowned,revoke-sessions,lockdown,delete-user} EMAIL
 
 claim-unowned: courses synced before sign-in existed have no owner and are
 hidden from everyone. They are claimed automatically when MOODLE_TOKEN_OWNER
@@ -6,6 +6,12 @@ signs in; this assigns them by hand.
 
 revoke-sessions: signs a user out everywhere, e.g. after a lost device.
 (Removing an address from ALLOWED_EMAILS already ends its sessions.)
+
+lockdown: incident response for a leaked SECRET_KEY or database (see
+docs/incident-response.md). Signs *every* user out, revokes each stored
+Google grant with Google and forgets every stored Google/Moodle token.
+Run it before rotating SECRET_KEY, or the stored tokens no longer decrypt
+and their grants have to be killed by deleting the OAuth client instead.
 
 delete-user: what Settings -> Delete account does, for a user who asks you
 to: revokes their Google grant and deletes them with all their data. Take
@@ -19,7 +25,7 @@ import argparse
 from sqlmodel import Session
 
 from app.account import SyncRunning, delete_account
-from app.auth import claim_unowned, find_user, revoke_sessions
+from app.auth import claim_unowned, find_user, lock_down, revoke_sessions
 from app.db import engine
 
 
@@ -30,11 +36,46 @@ def main() -> None:
     claim.add_argument("email")
     revoke = sub.add_parser("revoke-sessions", help="sign a user out on every device")
     revoke.add_argument("email")
+    lock = sub.add_parser(
+        "lockdown",
+        help="sign everyone out and forget every stored Google/Moodle token "
+             "(incident response; run before rotating SECRET_KEY)",
+    )
+    lock.add_argument("--dry-run", action="store_true",
+                      help="report what would change, without changing it")
+    lock.add_argument("--no-google-revoke", action="store_true",
+                      help="clear stored Google tokens without asking Google to revoke")
+    lock.add_argument("--keep-moodle", action="store_true",
+                      help="leave stored Moodle tokens in place")
     remove = sub.add_parser("delete-user", help="delete a user and all their data")
     remove.add_argument("email")
     args = parser.parse_args()
 
     with Session(engine) as session:
+        if args.command == "lockdown":
+            report = lock_down(
+                session,
+                revoke_google=not args.no_google_revoke,
+                keep_moodle=args.keep_moodle,
+                dry_run=args.dry_run,
+            )
+            if args.dry_run:
+                print(f"dry run: would sign out every user and forget credentials "
+                      f"for {report.cleared} of them")
+            else:
+                print(f"signed out every user; forgot credentials for {report.cleared}")
+                print(f"google grants revoked: {report.google_revoked}"
+                      + (f", could not revoke: {report.google_failed}"
+                         if report.google_failed else ""))
+            if report.undecryptable:
+                print(f"{report.undecryptable} stored Google token(s) did not decrypt "
+                      "(SECRET_KEY already rotated?); delete the OAuth client at Google "
+                      "to kill the grants behind them")
+            if not args.keep_moodle and not args.dry_run:
+                print("Moodle tokens were forgotten here but are still valid at Moodle; "
+                      "delete them in Moodle: Site administration > Server > "
+                      "Web services > Manage tokens")
+            return
         user = find_user(session, args.email)
         if user is None:
             raise SystemExit(f"no such user {args.email} — log in via the web UI first")

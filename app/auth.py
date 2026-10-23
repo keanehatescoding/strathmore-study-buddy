@@ -12,6 +12,7 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, replace
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select, update
@@ -118,7 +119,7 @@ def classroom_token_for(user: User | None) -> str | None:
     return None
 
 
-def revoke_google_token(token: str | None) -> bool:
+def revoke_google_token(token: str | None, timeout: int = 30) -> bool:
     """Ask Google to revoke the grant behind `token`. False when Google
     couldn't be reached: the grant may still be listed at
     myaccount.google.com until they remove it there."""
@@ -130,7 +131,7 @@ def revoke_google_token(token: str | None) -> bool:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=30):
+        with urllib.request.urlopen(req, timeout=timeout):
             pass
     except urllib.error.HTTPError as e:
         # invalid_token: already revoked or expired, so it's gone. Any other
@@ -230,6 +231,71 @@ def revoke_sessions(session: Session, user: User) -> None:
         .values(session_version=User.session_version + 1)
     )
     session.commit()
+
+
+@dataclass(frozen=True)
+class LockdownReport:
+    """What `lock_down` did (or, with dry_run, would do)."""
+
+    users: int
+    cleared: int
+    google_revoked: int
+    google_failed: int
+    undecryptable: int
+
+
+def lock_down(
+    session: Session,
+    *,
+    revoke_google: bool = True,
+    keep_moodle: bool = False,
+    dry_run: bool = False,
+) -> LockdownReport:
+    """Incident response: sign everyone out and forget every stored credential.
+
+    Bumps every user's session_version (so every existing cookie is rejected,
+    including one forged with a leaked SECRET_KEY) and clears the stored
+    Google refresh token and Moodle token. `revoke_google` also asks Google to
+    revoke each grant first, which is why this must run **before** SECRET_KEY
+    is rotated: after rotation the stored tokens no longer decrypt, so their
+    grants can't be revoked from here (delete the OAuth client instead).
+
+    Moodle tokens cannot be revoked through the web-service API; until they
+    are deleted in Moodle's admin token list they stay valid for whoever has
+    a copy. `keep_moodle` leaves the stored ones in place.
+    """
+    report = LockdownReport(users=0, cleared=0, google_revoked=0,
+                            google_failed=0, undecryptable=0)
+    if not dry_run:
+        # first, before any network call: a crash halfway through the sweep
+        # must still leave every existing cookie dead
+        session.exec(update(User).values(session_version=User.session_version + 1))
+        session.commit()
+    users = session.exec(select(User)).all()
+    for user in users:
+        sealed = user.google_refresh_token
+        token = refresh_token_for(user) if sealed else None
+        if sealed and token is None:
+            report = replace(report, undecryptable=report.undecryptable + 1)
+        if sealed is None and (keep_moodle or user.moodle_token is None):
+            continue
+        report = replace(report, users=report.users + 1)
+        if dry_run:
+            report = replace(report, cleared=report.cleared + 1)
+            continue
+        if revoke_google and token is not None:
+            # a short timeout: one unreachable grant shouldn't stall the sweep
+            if revoke_google_token(token, timeout=10):
+                report = replace(report, google_revoked=report.google_revoked + 1)
+            else:
+                report = replace(report, google_failed=report.google_failed + 1)
+        user.google_refresh_token = None
+        if not keep_moodle:
+            user.moodle_token = None
+        session.add(user)
+        session.commit()
+        report = replace(report, cleared=report.cleared + 1)
+    return report
 
 
 def claim_unowned(

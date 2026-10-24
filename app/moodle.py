@@ -41,6 +41,29 @@ class ForeignURLError(MoodleError):
     fetched: the token would be sent along with it."""
 
 
+class _RedirectRefused(Exception):
+    """Internal: a redirect to somewhere pluginfile.php shouldn't lead."""
+
+    def __init__(self, url: str):
+        super().__init__(url)
+        self.url = url
+
+
+class _ServedRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only when `serves` accepts its destination.
+
+    Checking the final URL after urlopen is too late: the request to the
+    redirect target has already gone out by then."""
+
+    def __init__(self, serves):
+        self._serves = serves
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not self._serves(newurl):
+            raise _RedirectRefused(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class MoodleClient:
     def __init__(self, base_url: str, token: str, timeout: int = 30):
         if not token:
@@ -72,7 +95,8 @@ class MoodleClient:
         if isinstance(body, dict) and body.get("exception"):
             code = body.get("errorcode")
             rejected = code in REJECTED_TOKEN_ERRORS or (
-                code == "accessexception" and function == SITE_INFO)
+                code == "accessexception" and function == SITE_INFO
+            )
             error = TokenRejected if rejected else MoodleError
             raise error(f"{function}: {code}: {body.get('message')}", errorcode=code)
         return body
@@ -99,22 +123,30 @@ class MoodleClient:
         return (
             url.scheme in (base.scheme, "https")
             and url.netloc.lower() == base.netloc.lower()
-            and url.path.startswith((f"{prefix}/webservice/pluginfile.php/",
-                                     f"{prefix}/pluginfile.php/"))
+            and url.path.startswith(
+                (f"{prefix}/webservice/pluginfile.php/", f"{prefix}/pluginfile.php/")
+            )
         )
 
     def download(self, fileurl: str) -> tuple[bytes, str | None]:
         """Download a fileurl. Returns (bytes, mime_type).
 
         Over MAX_DOWNLOAD_BYTES raises ExtractError (permanent): refused on
-        Content-Length when sent, else once the streamed body passes the cap."""
+        Content-Length when sent, else once the streamed body passes the cap.
+
+        A login page is a redirect off pluginfile.php (the HTML body of a real
+        .html file looks the same). Redirects are checked before they are
+        followed, so nothing off pluginfile.php is ever requested. A rejected
+        token on pluginfile.php is a JSON error object, not a file."""
         if not self.serves(fileurl):
             raise ForeignURLError(f"refusing to send the Moodle token to {fileurl}")
         sep = "&" if "?" in fileurl else "?"
         url = f"{fileurl}{sep}token={urllib.parse.quote(self.token)}"
         req = urllib.request.Request(url)
+        opener = urllib.request.build_opener(_ServedRedirects(self.serves))
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with opener.open(req, timeout=self.timeout) as resp:
+                final_url = resp.geturl()
                 mime = resp.headers.get_content_type()
                 length = resp.headers.get("Content-Length", "")
                 if length.isdigit() and int(length) > MAX_DOWNLOAD_BYTES:
@@ -128,13 +160,46 @@ class MoodleClient:
                 blob = b"".join(parts)
         except ExtractError:
             raise
+        except _RedirectRefused as e:
+            host = urllib.parse.urlsplit(e.url).netloc
+            raise MoodleError(
+                f"download of {fileurl} redirected to {host} — login page, token rejected?"
+            ) from None
         except Exception as e:
             raise MoodleError(f"download failed for {fileurl}: {e}") from e
-        if mime == "text/html" and blob.lstrip()[:1] == b"<":
-            raise MoodleError(
-                f"download returned a login page for {fileurl} — token rejected?"
-            )
+        if not self.serves(final_url):
+            raise MoodleError(f"download returned a login page for {fileurl} — token rejected?")
+        self._raise_pluginfile_json_error(blob, mime, fileurl)
         return blob, mime
+
+    def _raise_pluginfile_json_error(self, blob: bytes, mime: str | None, fileurl: str) -> None:
+        """Moodle answers a bad pluginfile token with HTTP 200 + JSON.
+
+        A .json file can look like that error, so for one only Moodle's full
+        exception envelope ("exception" + "errorcode") counts; a bare
+        "errorcode" is just file content. An envelope with a non-token code
+        (file access denied, not found) raises MoodleError. One claiming a
+        rejected token is checked with Moodle itself (site_info raises
+        TokenRejected if the token is really dead); a live token means the
+        body is just the file."""
+        if mime != "application/json":
+            return
+        try:
+            body = json.loads(blob.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(body, dict) or not body.get("errorcode"):
+            return
+        code = body["errorcode"]
+        if urllib.parse.urlsplit(fileurl).path.lower().endswith(".json"):
+            if not isinstance(body.get("exception"), str):
+                return
+            if code in REJECTED_TOKEN_ERRORS:
+                self.site_info()
+                return
+        detail = body.get("message") or body.get("error")
+        error = TokenRejected if code in REJECTED_TOKEN_ERRORS else MoodleError
+        raise error(f"download: {code}: {detail}", errorcode=code)
 
 
 _WS_FILES = "/webservice/pluginfile.php/"
@@ -154,10 +219,13 @@ def browser_url(fileurl: str) -> str:
     path = f"{head}{_FILES}{tail}" if ws else url.path
     if _FILES not in path:
         return fileurl
-    query = urllib.parse.urlencode([
-        (k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True)
-        if k.lower() not in _TOKEN_PARAMS
-    ])
+    query = urllib.parse.urlencode(
+        [
+            (k, v)
+            for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True)
+            if k.lower() not in _TOKEN_PARAMS
+        ]
+    )
     return urllib.parse.urlunsplit(url._replace(path=path, query=query))
 
 
@@ -194,9 +262,7 @@ def _file_fingerprint(c: dict) -> str:
     (.../mod_resource/content/<rev>/...), which Moodle bumps on every save, so
     a replaced file changes the marker even at the same size and mtime.
     """
-    return "|".join(
-        str(c.get(k) or "") for k in ("fileurl", "filesize", "timemodified")
-    )
+    return "|".join(str(c.get(k) or "") for k in ("fileurl", "filesize", "timemodified"))
 
 
 class MoodleAdapter:
@@ -258,17 +324,14 @@ class MoodleAdapter:
                     **{"courseids[0]": int(course_source_id)},
                 )
                 self._pages[course_source_id] = {
-                    p.get("coursemodule"): p.get("content")
-                    for p in pages.get("pages", [])
+                    p.get("coursemodule"): p.get("content") for p in pages.get("pages", [])
                 }
             except MoodleError:
                 self._pages[course_source_id] = None
         by_module = self._pages[course_source_id]
         return None if by_module is None else by_module.get(module_id)
 
-    def fetch_resources(
-        self, course_source_id: str, topic_source_id: str
-    ) -> list[ResourceData]:
+    def fetch_resources(self, course_source_id: str, topic_source_id: str) -> list[ResourceData]:
         sections = self._course_contents(course_source_id)
         section = next((s for s in sections if str(s["id"]) == topic_source_id), None)
         if section is None:
@@ -282,11 +345,14 @@ class MoodleAdapter:
                 for c in mod.get("contents", []):
                     if c.get("type") != "file":
                         continue
-                    out.append(_file_data(
-                        topic_source_id,
-                        f"{mod['id']}:{c.get('filepath', '/')}{c['filename']}",
-                        c["filename"], c,
-                    ))
+                    out.append(
+                        _file_data(
+                            topic_source_id,
+                            f"{mod['id']}:{c.get('filepath', '/')}{c['filename']}",
+                            c["filename"],
+                            c,
+                        )
+                    )
             elif modname == "url":
                 contents = mod.get("contents", [])
                 target = contents[0]["fileurl"] if contents else None
@@ -325,17 +391,24 @@ class MoodleAdapter:
                     continue
                 if len(files) == 1:
                     c = files[0]
-                    out.append(_file_data(
-                        topic_source_id, str(mod["id"]),
-                        mod.get("name") or c["filename"], c,
-                    ))
+                    out.append(
+                        _file_data(
+                            topic_source_id,
+                            str(mod["id"]),
+                            mod.get("name") or c["filename"],
+                            c,
+                        )
+                    )
                 else:  # same per-file treatment as folders
                     for c in files:
-                        out.append(_file_data(
-                            topic_source_id,
-                            f"{mod['id']}:{c.get('filepath', '/')}{c['filename']}",
-                            c["filename"], c,
-                        ))
+                        out.append(
+                            _file_data(
+                                topic_source_id,
+                                f"{mod['id']}:{c.get('filepath', '/')}{c['filename']}",
+                                c["filename"],
+                                c,
+                            )
+                        )
             # else: unknown modname — skip silently in v1 (visible via counts)
         return out
 
@@ -348,9 +421,7 @@ class MoodleAdapter:
 
         sections = self._course_contents(course_source_id)
         cmid_to_section = {
-            str(mod["id"]): str(s["id"])
-            for s in sections
-            for mod in s.get("modules", [])
+            str(mod["id"]): str(s["id"]) for s in sections for mod in s.get("modules", [])
         }
         resp = self.client.get_assignments(int(course_source_id))
         out: list[AssignmentData] = []
@@ -362,9 +433,7 @@ class MoodleAdapter:
                         source_id=str(a["id"]),
                         title=a.get("name", "Assignment"),
                         topic_source_id=cmid_to_section.get(str(a.get("cmid"))),
-                        due_date=(
-                            datetime.fromtimestamp(due, timezone.utc) if due else None
-                        ),
+                        due_date=(datetime.fromtimestamp(due, timezone.utc) if due else None),
                         description=a.get("intro"),
                     )
                 )

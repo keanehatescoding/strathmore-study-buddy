@@ -818,6 +818,48 @@ def test_redirect_handler_follows_a_pluginfile_destination():
     assert new is not None and new.full_url.endswith("/pluginfile.php/1/b.pdf")
 
 
+def test_download_never_requests_a_redirect_to_a_foreign_host():
+    """Real opener, real sockets: the refused target must see no request."""
+    import http.server
+    import threading
+
+    hits: list[str] = []
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"secret")
+
+        def log_message(self, *args):
+            pass
+
+    target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+    class Moodle(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/internal")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    site = http.server.HTTPServer(("127.0.0.1", 0), Moodle)
+    for server in (target, site):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{site.server_port}"
+        with pytest.raises(MoodleError, match="login page"):
+            MoodleClient(base, "tok").download(f"{base}/pluginfile.php/1/a.pdf")
+    finally:
+        for server in (target, site):
+            server.shutdown()
+            server.server_close()
+    assert hits == []
+
+
 def test_download_refused_redirect_reads_as_a_login_page(monkeypatch):
     import app.moodle as moodle
 

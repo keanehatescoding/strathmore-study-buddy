@@ -242,6 +242,9 @@ class LockdownReport:
     google_revoked: int
     google_failed: int
     undecryptable: int
+    # stored grants the caller told us not to revoke: cleared here, still live
+    # at Google
+    google_skipped: int = 0
     # the shared GOOGLE_REFRESH_TOKEN / MOODLE_TOKEN fallbacks come from the
     # environment, not the database, so they need their own accounting
     shared_google: bool = False
@@ -267,6 +270,10 @@ def lock_down(
     the stored tokens no longer decrypt, so their grants can't be revoked from
     here (delete the OAuth client instead).
 
+    Stored grants left alone by `revoke_google=False` are counted in
+    `google_skipped`: they are forgotten here but stay valid at Google, so a
+    caller treating this as incident containment must fail on them.
+
     A shared GOOGLE_REFRESH_TOKEN is revoked but not removed: the operator has
     to replace or unset it on every service. MOODLE_TOKEN cannot be revoked
     through the web-service API, and neither can per-user Moodle tokens; until
@@ -289,6 +296,9 @@ def lock_down(
         if sealed is None and (keep_moodle or user.moodle_token is None):
             continue
         report = replace(report, users=report.users + 1)
+        # counted in a dry run too: it says what a real run would leave live
+        if token is not None and not revoke_google:
+            report = replace(report, google_skipped=report.google_skipped + 1)
         if dry_run:
             report = replace(report, cleared=report.cleared + 1)
             continue

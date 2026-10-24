@@ -118,6 +118,18 @@ def test_lock_down_kills_sessions_before_touching_credentials(session, google, m
     assert all(u.session_version == 1 for u in session.exec(select(User)).all())
 
 
+def test_lock_down_counts_the_grants_no_google_revoke_leaves_live(session, google):
+    _users(session)
+    report = auth_mod.lock_down(session, revoke_google=False)
+
+    assert report.google_skipped == 1
+    assert report.google_revoked == 0 and report.google_failed == 0
+    assert google["revoked"] == []
+    # only revocation was skipped: the stored token is still forgotten here
+    session.expire_all()
+    assert session.exec(select(User.google_refresh_token)).all() == [None, None, None]
+
+
 def test_lock_down_still_clears_when_google_is_unreachable(session, google):
     _users(session)
     google["down"] = True
@@ -237,12 +249,16 @@ def test_admin_cli_lockdown_reports_what_it_did(session, google, monkeypatch, ca
     assert "still valid at Moodle" in out
 
 
-def test_admin_cli_lockdown_warns_about_undecryptable_tokens(
+def test_admin_cli_lockdown_warns_and_fails_on_undecryptable_tokens(
         session, google, monkeypatch, capsys):
     session.add(User(email="a@x.edu", google_refresh_token=seal(GOOGLE_PURPOSE, "rt-a")))
     session.commit()
     monkeypatch.setattr(auth_mod.settings, "secret_key", "rotated")
-    _run_cli(monkeypatch, session, "lockdown")
+    # the grant behind the unreadable token is still live at Google, so this is
+    # not complete containment even though no revocation was attempted
+    with pytest.raises(SystemExit) as exit_:
+        _run_cli(monkeypatch, session, "lockdown")
+    assert exit_.value.code == 1
     out = capsys.readouterr().out
     assert "did not decrypt" in out and "delete the OAuth client" in out
 
@@ -259,11 +275,31 @@ def test_admin_cli_lockdown_dry_run_says_so(session, google, monkeypatch, capsys
 def test_admin_cli_lockdown_no_google_revoke_and_keep_moodle(
         session, google, monkeypatch, capsys):
     _users(session)
-    _run_cli(monkeypatch, session, "lockdown", "--no-google-revoke", "--keep-moodle")
+    # the stored grant is forgotten here but still live at Google, so a
+    # lockdown that was meant to contain it must not report success
+    with pytest.raises(SystemExit) as exit_:
+        _run_cli(monkeypatch, session, "lockdown", "--no-google-revoke", "--keep-moodle")
+    assert exit_.value.code == 1
     out = capsys.readouterr().out
     assert google["revoked"] == []
     assert "forgot credentials for 1" in out
+    assert "1 stored Google token(s) were not revoked" in out
     assert "still valid at Moodle" not in out
     session.expire_all()
     assert len(session.exec(
         select(User).where(User.moodle_token.is_not(None))).all()) == 2
+
+
+def test_admin_cli_lockdown_dry_run_with_no_google_revoke_promises_no_revocation(
+        session, google, monkeypatch, capsys):
+    _users(session)
+    monkeypatch.setattr(auth_mod.settings, "google_refresh_token", "shared-rt")
+    _run_cli(monkeypatch, session, "lockdown", "--dry-run", "--no-google-revoke")
+    out = capsys.readouterr().out
+    assert "would revoke it with Google" not in out
+    assert "GOOGLE_REFRESH_TOKEN is configured as a shared fallback and was not " \
+           "revoked (--no-google-revoke)" in out
+    assert google["revoked"] == []
+    # a dry run reports, it doesn't fail automation and changes nothing
+    session.expire_all()
+    assert all(u.session_version == 0 for u in session.exec(select(User)).all())

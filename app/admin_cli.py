@@ -71,10 +71,33 @@ def main() -> None:
                 print(f"{report.undecryptable} stored Google token(s) did not decrypt "
                       "(SECRET_KEY already rotated?); delete the OAuth client at Google "
                       "to kill the grants behind them")
+            if report.shared_google:
+                if args.dry_run:
+                    print("GOOGLE_REFRESH_TOKEN is configured as a shared fallback; dry "
+                          "run: would revoke it with Google, then replace or remove it")
+                elif args.no_google_revoke:
+                    print("GOOGLE_REFRESH_TOKEN is configured as a shared fallback and was "
+                          "left untouched (--no-google-revoke); revoke it or delete the "
+                          "OAuth client, then replace or remove it")
+                elif report.shared_google_revoked:
+                    print("revoked the shared GOOGLE_REFRESH_TOKEN with Google; replace or "
+                          "remove it on every service")
+                else:
+                    print("could not revoke the shared GOOGLE_REFRESH_TOKEN; delete the "
+                          "OAuth client at Google and replace or remove the variable")
+            if report.shared_moodle:
+                print("MOODLE_TOKEN is configured as a shared fallback; it is not revoked "
+                      "here — delete it in Moodle and replace or remove it")
             if not args.keep_moodle and not args.dry_run:
                 print("Moodle tokens were forgotten here but are still valid at Moodle; "
                       "delete them in Moodle: Site administration > Server > "
                       "Web services > Manage tokens")
+            # automation must not read a half-done lockdown as success: a grant
+            # Google was not asked about, or could not revoke, is still live
+            incomplete = report.google_failed or (
+                report.shared_google and not report.shared_google_revoked)
+            if incomplete and not args.dry_run:
+                raise SystemExit(1)
             return
         user = find_user(session, args.email)
         if user is None:

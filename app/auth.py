@@ -242,6 +242,12 @@ class LockdownReport:
     google_revoked: int
     google_failed: int
     undecryptable: int
+    # the shared GOOGLE_REFRESH_TOKEN / MOODLE_TOKEN fallbacks come from the
+    # environment, not the database, so they need their own accounting
+    shared_google: bool = False
+    shared_google_revoked: int = 0
+    shared_google_failed: int = 0
+    shared_moodle: bool = False
 
 
 def lock_down(
@@ -254,15 +260,18 @@ def lock_down(
     """Incident response: sign everyone out and forget every stored credential.
 
     Bumps every user's session_version (so every existing cookie is rejected,
-    including one forged with a leaked SECRET_KEY) and clears the stored
+    including one forged with a leaked SECRET_KEY), then clears each stored
     Google refresh token and Moodle token. `revoke_google` also asks Google to
-    revoke each grant first, which is why this must run **before** SECRET_KEY
-    is rotated: after rotation the stored tokens no longer decrypt, so their
-    grants can't be revoked from here (delete the OAuth client instead).
+    revoke every grant first (per user and the shared GOOGLE_REFRESH_TOKEN),
+    which is why this must run **before** SECRET_KEY is rotated: after rotation
+    the stored tokens no longer decrypt, so their grants can't be revoked from
+    here (delete the OAuth client instead).
 
-    Moodle tokens cannot be revoked through the web-service API; until they
-    are deleted in Moodle's admin token list they stay valid for whoever has
-    a copy. `keep_moodle` leaves the stored ones in place.
+    A shared GOOGLE_REFRESH_TOKEN is revoked but not removed: the operator has
+    to replace or unset it on every service. MOODLE_TOKEN cannot be revoked
+    through the web-service API, and neither can per-user Moodle tokens; until
+    they are deleted in Moodle's admin token list they stay valid for whoever
+    has a copy. `keep_moodle` leaves the stored per-user ones in place.
     """
     report = LockdownReport(users=0, cleared=0, google_revoked=0,
                             google_failed=0, undecryptable=0)
@@ -295,6 +304,18 @@ def lock_down(
         session.add(user)
         session.commit()
         report = replace(report, cleared=report.cleared + 1)
+    # The shared fallbacks are env vars, so they are never "cleared"; only the
+    # Google one can be revoked with Google, and the env value must be
+    # replaced by the operator either way.
+    if settings.google_refresh_token.strip():
+        report = replace(report, shared_google=True)
+        if not dry_run and revoke_google:
+            if revoke_google_token(settings.google_refresh_token, timeout=10):
+                report = replace(report, shared_google_revoked=1)
+            else:
+                report = replace(report, shared_google_failed=1)
+    if settings.moodle_token.strip():
+        report = replace(report, shared_moodle=True)
     return report
 
 

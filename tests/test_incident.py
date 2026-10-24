@@ -11,11 +11,19 @@ import pytest
 from sqlmodel import Session, SQLModel, select
 
 from app import auth as auth_mod
+from app.config import settings
 from app.crypto import seal
 from app.models import User
 from tests.dbutil import make_engine
 
 GOOGLE_PURPOSE = "google-refresh-token"
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_tokens(monkeypatch):
+    """A developer's .env may set these; tests opt in explicitly."""
+    monkeypatch.setattr(settings, "google_refresh_token", "")
+    monkeypatch.setattr(settings, "moodle_token", "")
 
 
 @pytest.fixture()
@@ -167,6 +175,54 @@ def test_lock_down_no_op_on_an_empty_database(session, google):
     report = auth_mod.lock_down(session)
     assert report == auth_mod.LockdownReport(
         users=0, cleared=0, google_revoked=0, google_failed=0, undecryptable=0)
+
+
+# -- the shared GOOGLE_REFRESH_TOKEN / MOODLE_TOKEN fallbacks --------------
+
+
+def test_lock_down_revokes_the_shared_google_token(session, google, monkeypatch):
+    monkeypatch.setattr(settings, "google_refresh_token", "shared-rt")
+    report = auth_mod.lock_down(session)
+
+    assert report.shared_google is True
+    assert report.shared_google_revoked == 1
+    assert report.shared_google_failed == 0
+    assert google["revoked"] == [b"token=shared-rt"]
+
+
+def test_lock_down_reports_a_shared_google_token_it_could_not_revoke(
+        session, google, monkeypatch):
+    monkeypatch.setattr(settings, "google_refresh_token", "shared-rt")
+    google["down"] = True
+    report = auth_mod.lock_down(session)
+
+    assert report.shared_google is True
+    assert report.shared_google_revoked == 0
+    assert report.shared_google_failed == 1
+
+
+def test_lock_down_dry_run_does_not_revoke_the_shared_google_token(
+        session, google, monkeypatch):
+    monkeypatch.setattr(settings, "google_refresh_token", "shared-rt")
+    report = auth_mod.lock_down(session, dry_run=True)
+
+    assert report.shared_google is True and report.shared_google_revoked == 0
+    assert google["revoked"] == []
+
+
+def test_lock_down_no_google_revoke_leaves_the_shared_grant_live(
+        session, google, monkeypatch):
+    monkeypatch.setattr(settings, "google_refresh_token", "shared-rt")
+    report = auth_mod.lock_down(session, revoke_google=False)
+
+    assert report.shared_google is True and report.shared_google_revoked == 0
+    assert google["revoked"] == []
+
+
+def test_lock_down_reports_the_shared_moodle_token(session, google, monkeypatch):
+    monkeypatch.setattr(settings, "moodle_token", "shared-moodle")
+    report = auth_mod.lock_down(session)
+    assert report.shared_moodle is True
 
 
 # -- admin_cli lockdown ---------------------------------------------------

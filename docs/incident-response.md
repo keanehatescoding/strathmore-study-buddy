@@ -12,14 +12,14 @@ their grants can no longer be revoked from here.
 
 ## 1. What an attacker with platform access has
 
-| Asset | Consequence |
-|---|---|
-| `SECRET_KEY` | Forges the signed session cookie (`SessionMiddleware`) for **any user**, with no password. Also derives the Fernet keys for stored Moodle/Google tokens (purpose-separated, same secret) and the unsubscribe links. |
-| `DATABASE_URL` | All users (emails), courses, resources, assignments, quiz/review history, notifications, job queue, and the encrypted tokens above. |
-| `GOOGLE_CLIENT_ID/SECRET`, stored Google refresh tokens | Sign-in plus Classroom and `drive.readonly` access to each connected student's Google account. Rotating only the client secret does **not** revoke tokens already issued. |
-| `MOODLE_TOKEN` and per-user Moodle tokens | Read access to Moodle courses and files for the token's owner. |
-| `LLM_API_KEY`, `RESEND_API_KEY` | Billing abuse; phishing from the verified sending domain. |
-| Deploy rights on `web`, `worker`, `sync-cron`, `pipeline-cron` | Arbitrary code with env + DB access, persistence, exfiltration, `railway up` outside GitHub. |
+| Asset                                                          | Consequence                                                                                                                                                                                                         |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SECRET_KEY`                                                   | Forges the signed session cookie (`SessionMiddleware`) for **any user**, with no password. Also derives the Fernet keys for stored Moodle/Google tokens (purpose-separated, same secret) and the unsubscribe links. |
+| `DATABASE_URL`                                                 | All users (emails), courses, resources, assignments, quiz/review history, notifications, job queue, and the encrypted tokens above.                                                                                 |
+| `GOOGLE_CLIENT_ID/SECRET`, stored Google refresh tokens        | Sign-in plus Classroom and `drive.readonly` access to each connected student's Google account. Rotating only the client secret does **not** revoke tokens already issued.                                           |
+| `MOODLE_TOKEN` and per-user Moodle tokens                      | Read access to Moodle courses and files for the token's owner.                                                                                                                                                      |
+| `LLM_API_KEY`, `RESEND_API_KEY`                                | Billing abuse; phishing from the verified sending domain.                                                                                                                                                           |
+| Deploy rights on `web`, `worker`, `sync-cron`, `pipeline-cron` | Arbitrary code with env + DB access, persistence, exfiltration, `railway up` outside GitHub.                                                                                                                        |
 
 `SECRET_KEY` gives impersonation; the tokens give third-party access. Rotate
 both, and treat every stored credential as already plaintext.
@@ -39,7 +39,7 @@ happened. Capture, in this order:
 - [ ] Database snapshot: `pg_dump --no-owner "$DATABASE_URL" > incident.dump`
       (or the Railway backup). Do this before any rotation.
 - [ ] DB audit: `psql "$DATABASE_URL" -f scripts/incident_audit.sql >
-      incident-db-audit.txt` (edit `since` in the file first).
+    incident-db-audit.txt` (edit `since` in the file first).
 - [ ] Mail log from Resend (sends you did not trigger), LLM usage/billing,
       Google Cloud audit log for the OAuth client (Workspace:
       admin.google.com → Reports → Audit log → OAuth log events).
@@ -83,6 +83,11 @@ Then restart/redeploy **all** services so nothing holds an old session.
 without calling Google (only if Google is unreachable — delete the OAuth
 client instead, below).
 
+Moodle tokens can't be revoked by the app, so `lockdown` **exits 1** while any
+are still live at Moodle (stored, forgotten, or the shared `MOODLE_TOKEN`).
+Delete them in Moodle (Site administration → Server → Web services → Manage
+tokens), then re-run with `--moodle-revoked` to confirm and get exit 0.
+
 ### 4b. `SECRET_KEY`
 
 ```sh
@@ -111,15 +116,15 @@ does not return: myaccount.google.com/permissions.
 
 ### 4d. Everything else
 
-| Secret | Action | User impact |
-|---|---|---|
-| `DATABASE_URL` | `ALTER ROLE <user> PASSWORD '<new>';`, update every service, redeploy; confirm no public TCP proxy on the Postgres service. Check `pg_roles` for new roles first. | None if cut over cleanly. |
-| `MOODLE_TOKEN` (global) | Delete the token in Moodle (Site administration → Server → Web services → Manage tokens). | Only `MOODLE_TOKEN_OWNER`. |
-| Per-user Moodle tokens | Delete them in the same Moodle token list. `lockdown` only forgets our copy; the tokens stay valid at Moodle until removed there. | Users reconnect at Settings → Moodle. |
-| `RESEND_API_KEY` | Revoke and recreate; check sent mail for phishing; review domain DNS/DKIM. | None. |
-| `LLM_API_KEY` | Revoke and recreate; check usage/billing. | None. |
-| `HEALTHCHECK_PING_URL` | Recreate the check URL if it appeared in logs. | None. |
-| GitHub token/SSH key | Revoke and reissue; review audit log for pushes. | None. |
+| Secret                  | Action                                                                                                                                                            | User impact                           |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `DATABASE_URL`          | `ALTER ROLE <user> PASSWORD '<new>';`, update every service, redeploy; confirm no public TCP proxy on the Postgres service. Check `pg_roles` for new roles first. | None if cut over cleanly.             |
+| `MOODLE_TOKEN` (global) | Delete the token in Moodle (Site administration → Server → Web services → Manage tokens).                                                                         | Only `MOODLE_TOKEN_OWNER`.            |
+| Per-user Moodle tokens  | Delete them in the same Moodle token list. `lockdown` only forgets our copy; the tokens stay valid at Moodle until removed there.                                 | Users reconnect at Settings → Moodle. |
+| `RESEND_API_KEY`        | Revoke and recreate; check sent mail for phishing; review domain DNS/DKIM.                                                                                        | None.                                 |
+| `LLM_API_KEY`           | Revoke and recreate; check usage/billing.                                                                                                                         | None.                                 |
+| `HEALTHCHECK_PING_URL`  | Recreate the check URL if it appeared in logs.                                                                                                                    | None.                                 |
+| GitHub token/SSH key    | Revoke and reissue; review audit log for pushes.                                                                                                                  | None.                                 |
 
 ### 4e. Deploy clean
 

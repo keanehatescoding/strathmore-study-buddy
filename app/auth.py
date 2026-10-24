@@ -38,8 +38,11 @@ class AuthError(RuntimeError):
 
 
 def login_url(
-    client_id: str, redirect_uri: str, state: str,
-    consent: bool = False, login_hint: str | None = None,
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    consent: bool = False,
+    login_hint: str | None = None,
 ) -> str:
     """Google's sign-in URL. Google only hands out a refresh token on a
     consent screen, so `consent` forces one; otherwise returning users just
@@ -81,9 +84,7 @@ def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: s
 
 
 def fetch_email(access_token: str) -> str:
-    req = urllib.request.Request(
-        USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}
-    )
+    req = urllib.request.Request(USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             info = json.loads(resp.read().decode())
@@ -126,7 +127,8 @@ def revoke_google_token(token: str | None, timeout: int = 30) -> bool:
     if not token:
         return True
     req = urllib.request.Request(
-        REVOKE_URL, data=urllib.parse.urlencode({"token": token}).encode(),
+        REVOKE_URL,
+        data=urllib.parse.urlencode({"token": token}).encode(),
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
@@ -171,7 +173,8 @@ def forget_revoked_token(session: Session, user: User, token: str) -> bool:
     # compare-and-clear in the UPDATE itself: a sign-in that stores a fresh
     # token between the read above and this write must not be wiped
     cleared = session.exec(
-        update(User).where(User.id == user.id, User.google_refresh_token == sealed)
+        update(User)
+        .where(User.id == user.id, User.google_refresh_token == sealed)
         .values(google_refresh_token=None)
     ).rowcount
     session.commit()
@@ -183,14 +186,13 @@ def find_user(session: Session, email: str) -> User | None:
     """Case-insensitive, so rows stored before normalization still match
     (an exact, already-normalized row wins)."""
     email = normalize_email(email)
-    return session.exec(select(User).where(User.email == email)).first() or session.exec(
-        select(User).where(func.lower(User.email) == email)
-    ).first()
+    return (
+        session.exec(select(User).where(User.email == email)).first()
+        or session.exec(select(User).where(func.lower(User.email) == email)).first()
+    )
 
 
-def sign_in(
-    session: Session, email: str, refresh_token: str | None = None
-) -> User:
+def sign_in(session: Session, email: str, refresh_token: str | None = None) -> User:
     """Upsert user by email, store Classroom refresh token, claim courses."""
     email = normalize_email(email)
     try:
@@ -226,9 +228,7 @@ def revoke_sessions(session: Session, user: User) -> None:
     # a database-side increment: two overlapping revocations must land on
     # N+2, not both write N+1 and let a cookie issued in between survive
     session.exec(
-        update(User)
-        .where(User.id == user.id)
-        .values(session_version=User.session_version + 1)
+        update(User).where(User.id == user.id).values(session_version=User.session_version + 1)
     )
     session.commit()
 
@@ -251,6 +251,11 @@ class LockdownReport:
     shared_google_revoked: int = 0
     shared_google_failed: int = 0
     shared_moodle: bool = False
+    # per-user Moodle tokens: Moodle's web-service API can't revoke either kind,
+    # so a token we forgot is still live at Moodle (moodle_cleared) and one we
+    # were told to keep is still live and still stored (moodle_kept)
+    moodle_cleared: int = 0
+    moodle_kept: int = 0
 
 
 def lock_down(
@@ -279,9 +284,11 @@ def lock_down(
     through the web-service API, and neither can per-user Moodle tokens; until
     they are deleted in Moodle's admin token list they stay valid for whoever
     has a copy. `keep_moodle` leaves the stored per-user ones in place.
+    Either way they are counted (`moodle_cleared` / `moodle_kept`, plus
+    `shared_moodle`) so a caller treating this as incident containment can
+    refuse to call it complete until the operator has revoked them in Moodle.
     """
-    report = LockdownReport(users=0, cleared=0, google_revoked=0,
-                            google_failed=0, undecryptable=0)
+    report = LockdownReport(users=0, cleared=0, google_revoked=0, google_failed=0, undecryptable=0)
     if not dry_run:
         # first, before any network call: a crash halfway through the sweep
         # must still leave every existing cookie dead
@@ -293,6 +300,13 @@ def lock_down(
         token = refresh_token_for(user) if sealed else None
         if sealed and token is None:
             report = replace(report, undecryptable=report.undecryptable + 1)
+        # counted before the skip below and in a dry run too: it says what a
+        # real run would leave live at Moodle
+        if user.moodle_token is not None:
+            if keep_moodle:
+                report = replace(report, moodle_kept=report.moodle_kept + 1)
+            else:
+                report = replace(report, moodle_cleared=report.moodle_cleared + 1)
         if sealed is None and (keep_moodle or user.moodle_token is None):
             continue
         report = replace(report, users=report.users + 1)
@@ -329,16 +343,14 @@ def lock_down(
     return report
 
 
-def claim_unowned(
-    session: Session, user: User, source: str | None = None
-) -> tuple[int, int]:
+def claim_unowned(session: Session, user: User, source: str | None = None) -> tuple[int, int]:
     """Give unowned (pre-auth) courses to `user`, optionally only from
     `source`. Returns (claimed, skipped): a course the user already has their
     own copy of (same source and id) is skipped, since (user_id, source,
     source_id) is unique."""
-    have = set(session.exec(
-        select(Course.source, Course.source_id).where(Course.user_id == user.id)
-    ).all())
+    have = set(
+        session.exec(select(Course.source, Course.source_id).where(Course.user_id == user.id)).all()
+    )
     q = select(Course).where(Course.user_id.is_(None))
     if source is not None:
         q = q.where(Course.source == source)

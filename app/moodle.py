@@ -175,10 +175,13 @@ class MoodleClient:
     def _raise_pluginfile_json_error(self, blob: bytes, mime: str | None, fileurl: str) -> None:
         """Moodle answers a bad pluginfile token with HTTP 200 + JSON.
 
-        A .json file can look exactly like that error, so for one the body
-        alone can't say. When it claims a rejected token, ask Moodle itself
-        (site_info raises TokenRejected if the token is really dead); a live
-        token means the body is just the file."""
+        A .json file can look like that error, so for one only Moodle's full
+        exception envelope ("exception" + "errorcode") counts; a bare
+        "errorcode" is just file content. An envelope with a non-token code
+        (file access denied, not found) raises MoodleError. One claiming a
+        rejected token is checked with Moodle itself (site_info raises
+        TokenRejected if the token is really dead); a live token means the
+        body is just the file."""
         if mime != "application/json":
             return
         try:
@@ -189,9 +192,11 @@ class MoodleClient:
             return
         code = body["errorcode"]
         if urllib.parse.urlsplit(fileurl).path.lower().endswith(".json"):
+            if not isinstance(body.get("exception"), str):
+                return
             if code in REJECTED_TOKEN_ERRORS:
                 self.site_info()
-            return
+                return
         detail = body.get("message") or body.get("error")
         error = TokenRejected if code in REJECTED_TOKEN_ERRORS else MoodleError
         raise error(f"download: {code}: {detail}", errorcode=code)

@@ -756,6 +756,27 @@ def test_download_json_file_error_body_with_dead_token_raises_token_rejected(mon
         _json_file_download(monkeypatch, body, dead)
 
 
+def test_download_json_file_with_moodle_access_exception_raises_moodle_error(monkeypatch):
+    body = b'{"exception":"moodle_exception","errorcode":"filenotfound","message":"File not found"}'
+
+    def probe(self):
+        raise AssertionError("no token probe for a non-token error")
+
+    with pytest.raises(MoodleError, match="filenotfound") as ei:
+        _json_file_download(monkeypatch, body, probe)
+    assert not isinstance(ei.value, TokenRejected)
+
+
+def test_download_json_file_with_bare_errorcode_is_kept(monkeypatch):
+    body = b'{"errorcode":"filenotfound","message":"a user note"}'
+
+    def probe(self):
+        raise AssertionError("no token probe for a non-token error")
+
+    blob, _ = _json_file_download(monkeypatch, body, probe)
+    assert blob == body
+
+
 def test_download_ordinary_json_file_skips_the_token_probe(monkeypatch):
     body = b'{"title": "notes"}'
 

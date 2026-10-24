@@ -23,13 +23,16 @@ from app.extract import (
 from app.moodle import MoodleClient, MoodleError, TokenRejected
 
 
-@pytest.mark.parametrize("blob", [
-    codecs.BOM_UTF8 + "Größe".encode(),
-    "Größe".encode("utf-16"),  # BOM + LE
-    codecs.BOM_UTF16_BE + "Größe".encode("utf-16-be"),
-    "Größe".encode("utf-32"),
-    "Größe".encode(),
-])
+@pytest.mark.parametrize(
+    "blob",
+    [
+        codecs.BOM_UTF8 + "Größe".encode(),
+        "Größe".encode("utf-16"),  # BOM + LE
+        codecs.BOM_UTF16_BE + "Größe".encode("utf-16-be"),
+        "Größe".encode("utf-32"),
+        "Größe".encode(),
+    ],
+)
 def test_decode_text_honours_boms(blob):
     assert decode_text(blob) == "Größe"
 
@@ -44,17 +47,20 @@ def test_text_files_decode_through_extract_bytes():
 
 
 def test_html_to_text_drops_markup():
-    html = ("<html><head><title>T</title><style>p{color:red}</style></head><body>"
-            "<h1>Trees</h1><p>A &amp; B<br>root</p><script>alert(1)</script>"
-            "<ul><li>leaf</li><li>node</li></ul>"
-            "<table><tr><td>a</td><td>b</td></tr></table></body></html>")
+    html = (
+        "<html><head><title>T</title><style>p{color:red}</style></head><body>"
+        "<h1>Trees</h1><p>A &amp; B<br>root</p><script>alert(1)</script>"
+        "<ul><li>leaf</li><li>node</li></ul>"
+        "<table><tr><td>a</td><td>b</td></tr></table></body></html>"
+    )
     text = html_to_text(html)
     assert "<" not in text and "alert" not in text and "color" not in text
     assert text == "Trees\n\nA & B\nroot\n\n- leaf\n- node\n\na | b"
 
 
-@pytest.mark.parametrize("mime, name", [("text/html", "x"), (None, "page.html"),
-                                        (None, "page.HTM")])
+@pytest.mark.parametrize(
+    "mime, name", [("text/html", "x"), (None, "page.html"), (None, "page.HTM")]
+)
 def test_html_files_are_converted(mime, name):
     assert extract_bytes(b"<p>Hello <b>world</b></p>", mime, name) == "Hello world"
 
@@ -91,19 +97,27 @@ def _fixture(name: str) -> bytes:
     return gzip.decompress((Path(__file__).parent / "fixtures" / f"{name}.gz").read_bytes())
 
 
-PPT_TEXT = ("--- Slide 1 ---\nDomain Name System\nDNS maps names to addresses\n"
-            "Resolvers ask the root servers first\n\n"
-            "--- Slide 2 ---\nRecord types\nA records hold IPv4 addresses\n"
-            "MX records name mail exchangers – café")  # slide 3 has no text
-DOC_TEXT = ("Indus Valley Civilization\nThe civilization flourished around 2500 BCE.\n"
-            "Harappa and Mohenjo-daro were its largest cities – café.\n"
-            "Period | Dates\nVedic | 1500 BCE")
+PPT_TEXT = (
+    "--- Slide 1 ---\nDomain Name System\nDNS maps names to addresses\n"
+    "Resolvers ask the root servers first\n\n"
+    "--- Slide 2 ---\nRecord types\nA records hold IPv4 addresses\n"
+    "MX records name mail exchangers – café"
+)  # slide 3 has no text
+DOC_TEXT = (
+    "Indus Valley Civilization\nThe civilization flourished around 2500 BCE.\n"
+    "Harappa and Mohenjo-daro were its largest cities – café.\n"
+    "Period | Dates\nVedic | 1500 BCE"
+)
 
 
-@pytest.mark.parametrize("mime, name", [
-    ("application/vnd.ms-powerpoint", "x"), (None, "Lecture%202.PPT"),
-    ("application/octet-stream", "show.pps"),
-])
+@pytest.mark.parametrize(
+    "mime, name",
+    [
+        ("application/vnd.ms-powerpoint", "x"),
+        (None, "Lecture%202.PPT"),
+        ("application/octet-stream", "show.pps"),
+    ],
+)
 def test_legacy_ppt_extracts_slide_text(mime, name):
     assert extract_bytes(_fixture("legacy.ppt"), mime, name) == PPT_TEXT
 
@@ -114,11 +128,13 @@ def test_legacy_doc_extracts_body_text_and_tables(mime, name):
 
 
 def test_rtf_saved_as_doc_is_read():
-    rtf = (rb"{\rtf1\ansi\ansicpg1252\uc1{\fonttbl{\f0 Arial;}}{\*\generator Word;}"
-           rb"{\info{\title Hidden}}\pard Caf\'e9 \u8211?dash \u-10179?\u-8704? {\b bold}\par"
-           b"\r\n"
-           rb"{\field{\*\fldinst HYPERLINK \\l x}{\fldrslt link}}\par "
-           rb"a\cell b\cell\row{\pict\bin4 }{}{}\}\{\\\par}")
+    rtf = (
+        rb"{\rtf1\ansi\ansicpg1252\uc1{\fonttbl{\f0 Arial;}}{\*\generator Word;}"
+        rb"{\info{\title Hidden}}\pard Caf\'e9 \u8211?dash \u-10179?\u-8704? {\b bold}\par"
+        b"\r\n"
+        rb"{\field{\*\fldinst HYPERLINK \\l x}{\fldrslt link}}\par "
+        rb"a\cell b\cell\row{\pict\bin4 }{}{}\}\{\\\par}"
+    )
     expected = "Café –dash \U0001f600 bold\nlink\na | b\n}{\\"
     assert extract_bytes(rtf, "application/msword", "notes.doc") == expected
     assert extract_bytes(rtf, "text/rtf", "x") == expected
@@ -135,8 +151,12 @@ def test_office_xml_under_a_legacy_name_goes_to_the_xml_reader(monkeypatch):
 
 @pytest.mark.parametrize("name, kind", [("a.ppt", "PPT"), ("a.doc", "DOC")])
 def test_broken_legacy_files_are_extract_errors(name, kind):
-    blobs = [b"not an office file", legacy.OLE_MAGIC + b"\0" * 600,
-             _fixture("legacy.ppt")[:4096], _fixture("legacy.doc")[:4096]]
+    blobs = [
+        b"not an office file",
+        legacy.OLE_MAGIC + b"\0" * 600,
+        _fixture("legacy.ppt")[:4096],
+        _fixture("legacy.doc")[:4096],
+    ]
     for blob in blobs:
         with pytest.raises(ExtractError, match=f"{kind} can't be read"):
             extract_bytes(blob, None, name)
@@ -187,44 +207,64 @@ def _retyped(blob: bytes, old: bytes, main_type: str | None) -> bytes:
     full = b"application/vnd.openxmlformats-officedocument." + old
     assert full in members["[Content_Types].xml"]
     members["[Content_Types].xml"] = members["[Content_Types].xml"].replace(
-        full, main_type.encode())
+        full, main_type.encode()
+    )
     return _zip(members)
 
 
 OOXML = "application/vnd.openxmlformats-officedocument."
 
 
-@pytest.mark.parametrize("main_type, mime, name", [
-    (None, "application/octet-stream", "a.pptx"),
-    (OOXML + "presentationml.slideshow.main+xml",
-     OOXML + "presentationml.slideshow", "x"),
-    (OOXML + "presentationml.slideshow.main+xml", "application/octet-stream", "a.PPSX"),
-    (OOXML + "presentationml.template.main+xml", None, "a.potx"),
-    ("application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
-     "application/octet-stream", "a.pptm"),
-    ("application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
-     "application/vnd.ms-powerpoint.presentation.macroenabled.12", "x"),
-])
+@pytest.mark.parametrize(
+    "main_type, mime, name",
+    [
+        (None, "application/octet-stream", "a.pptx"),
+        (OOXML + "presentationml.slideshow.main+xml", OOXML + "presentationml.slideshow", "x"),
+        (OOXML + "presentationml.slideshow.main+xml", "application/octet-stream", "a.PPSX"),
+        (OOXML + "presentationml.template.main+xml", None, "a.potx"),
+        (
+            "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+            "application/octet-stream",
+            "a.pptm",
+        ),
+        (
+            "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+            "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+            "x",
+        ),
+    ],
+)
 def test_slide_shows_templates_and_macro_files_read_as_pptx(main_type, mime, name):
     assert extract_bytes(_pptx(main_type), mime, name) == "--- Slide 1 ---\nRouting"
 
 
-@pytest.mark.parametrize("main_type, mime, name", [
-    (None, "application/octet-stream", "a.docx"),
-    ("application/vnd.ms-word.document.macroEnabled.main+xml",
-     "application/octet-stream", "a.docm"),
-    ("application/vnd.ms-word.document.macroEnabled.main+xml",
-     "application/vnd.ms-word.document.macroenabled.12", "x"),
-    (OOXML + "wordprocessingml.template.main+xml", None, "a.dotx"),
-])
+@pytest.mark.parametrize(
+    "main_type, mime, name",
+    [
+        (None, "application/octet-stream", "a.docx"),
+        (
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+            "application/octet-stream",
+            "a.docm",
+        ),
+        (
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+            "application/vnd.ms-word.document.macroenabled.12",
+            "x",
+        ),
+        (OOXML + "wordprocessingml.template.main+xml", None, "a.dotx"),
+    ],
+)
 def test_templates_and_macro_files_read_as_docx(main_type, mime, name):
     assert extract_bytes(_docx(main_type), mime, name) == "Switching"
 
 
 def test_opendocument_files_are_unsupported_not_fed_to_the_pptx_reader():
     odp = _zip({"content.xml": b"<x/>"})
-    for mime, name in [("application/vnd.oasis.opendocument.presentation", "a.odp"),
-                       ("application/vnd.oasis.opendocument.text", "a.odt")]:
+    for mime, name in [
+        ("application/vnd.oasis.opendocument.presentation", "a.odp"),
+        ("application/vnd.oasis.opendocument.text", "a.odt"),
+    ]:
         with pytest.raises(ExtractError, match="unsupported type"):
             extract_bytes(odp, mime, name)
 
@@ -253,12 +293,15 @@ def _damaged(blob: bytes, member: str, method: int) -> bytes:
 
 
 @pytest.mark.parametrize("method", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
-@pytest.mark.parametrize("make, name, member", [
-    (_pptx, "a.pptx", "[Content_Types].xml"),
-    (_pptx, "a.pptx", "ppt/slides/slide1.xml"),
-    (_docx, "a.docx", "[Content_Types].xml"),
-    (_docx, "a.docx", "word/document.xml"),
-])
+@pytest.mark.parametrize(
+    "make, name, member",
+    [
+        (_pptx, "a.pptx", "[Content_Types].xml"),
+        (_pptx, "a.pptx", "ppt/slides/slide1.xml"),
+        (_docx, "a.docx", "[Content_Types].xml"),
+        (_docx, "a.docx", "word/document.xml"),
+    ],
+)
 def test_a_package_with_a_damaged_member_is_an_extract_error(make, name, member, method):
     kind = name[2:].upper()
     with pytest.raises(ExtractError, match=f"{kind} is damaged"):
@@ -294,8 +337,10 @@ def test_a_pdf_is_known_by_its_first_bytes_whatever_it_is_called(monkeypatch):
 
 
 def test_html_without_a_closing_head_tag_keeps_its_body():
-    html = ("<!doctype html><html><head><meta charset=utf-8><title>T</title>"
-            "<style>p{color:red}</style><body><p>hi</p><p>there</p></body></html>")
+    html = (
+        "<!doctype html><html><head><meta charset=utf-8><title>T</title>"
+        "<style>p{color:red}</style><body><p>hi</p><p>there</p></body></html>"
+    )
     assert html_to_text(html) == "hi\n\nthere"
     assert html_to_text("<head><title>T</title><p>no body tag</p>") == "no body tag"
     # a tag <head> may hold doesn't stop it ending at the first tag it may not
@@ -344,8 +389,10 @@ def _ppt_stream(saves: list[dict[int, bytes]], doc_id: int = 1) -> tuple[bytes, 
 
 
 def _ppt_slides(monkeypatch, data: bytes, edit: int) -> list[str]:
-    streams = {"PowerPoint Document": data,
-               "Current User": _rec(0x0FF6, struct.pack("<III", 0x14, 0xE391C05F, edit))}
+    streams = {
+        "PowerPoint Document": data,
+        "Current User": _rec(0x0FF6, struct.pack("<III", 0x14, 0xE391C05F, edit)),
+    }
     monkeypatch.setattr(legacy, "_open", lambda blob: io.BytesIO())
     monkeypatch.setattr(legacy, "_stream", lambda ole, name: streams[name])
     return legacy.ppt_slides(b"")
@@ -357,18 +404,35 @@ def test_ppt_placeholder_text_is_read_from_the_outline_in_shape_order(monkeypatc
     def header(kind):
         return _rec(0x0F9F, struct.pack("<I", kind))
 
-    slide_list = _rec(0x0FF0, ver=0xF, body=(
-        _rec(0x03F3, struct.pack("<IIiII", 2, 0, 2, 256, 0))
-        + header(0) + _rec(0x0FA8, b"Title\x0bwrapped")
-        + header(1) + _rec(0x0FA0, "Body – one\rtwo".encode("utf-16-le"))
-        + header(1)  # an empty placeholder still takes an index
-        + header(1) + _rec(0x0FA8, b"*")  # slide number
-        + header(1) + _rec(0x0FA8, b"Unreferenced")
-        + _rec(0x03F3, struct.pack("<IIiII", 3, 0, 0, 257, 0))
-        + header(0) + _rec(0x0FA8, b"Second")))
-    masters = _rec(0x0FF0, ver=0xF, instance=1, body=(
-        _rec(0x03F3, struct.pack("<IIiII", 9, 0, 1, 1, 0))
-        + header(0) + _rec(0x0FA8, b"Click to edit Master title style")))
+    slide_list = _rec(
+        0x0FF0,
+        ver=0xF,
+        body=(
+            _rec(0x03F3, struct.pack("<IIiII", 2, 0, 2, 256, 0))
+            + header(0)
+            + _rec(0x0FA8, b"Title\x0bwrapped")
+            + header(1)
+            + _rec(0x0FA0, "Body – one\rtwo".encode("utf-16-le"))
+            + header(1)  # an empty placeholder still takes an index
+            + header(1)
+            + _rec(0x0FA8, b"*")  # slide number
+            + header(1)
+            + _rec(0x0FA8, b"Unreferenced")
+            + _rec(0x03F3, struct.pack("<IIiII", 3, 0, 0, 257, 0))
+            + header(0)
+            + _rec(0x0FA8, b"Second")
+        ),
+    )
+    masters = _rec(
+        0x0FF0,
+        ver=0xF,
+        instance=1,
+        body=(
+            _rec(0x03F3, struct.pack("<IIiII", 9, 0, 1, 1, 0))
+            + header(0)
+            + _rec(0x0FA8, b"Click to edit Master title style")
+        ),
+    )
     document = _rec(0x03E8, masters + slide_list, ver=0xF)
 
     def shape(*records):  # SpContainer > ClientTextbox, which isn't flagged a container
@@ -377,33 +441,61 @@ def test_ppt_placeholder_text_is_read_from_the_outline_in_shape_order(monkeypatc
     def ref(index):
         return _rec(0x0F9E, struct.pack("<i", index))
 
-    slide = _rec(0x03EE, ver=0xF, body=_rec(0x040C, ver=0xF, body=(
-        shape(ref(0)) + shape(header(4), _rec(0x0FA8, b"Text box")) + shape(ref(1))
-        + shape(ref(2)) + shape(ref(3)) + shape(ref(99)))))
+    slide = _rec(
+        0x03EE,
+        ver=0xF,
+        body=_rec(
+            0x040C,
+            ver=0xF,
+            body=(
+                shape(ref(0))
+                + shape(header(4), _rec(0x0FA8, b"Text box"))
+                + shape(ref(1))
+                + shape(ref(2))
+                + shape(ref(3))
+                + shape(ref(99))
+            ),
+        ),
+    )
     data, edit = _ppt_stream([{1: document, 2: slide}])  # slide 3's record is missing
     assert _ppt_slides(monkeypatch, data, edit) == [
-        "Title\nwrapped\nText box\nBody – one\ntwo\nUnreferenced", "Second"]
+        "Title\nwrapped\nText box\nBody – one\ntwo\nUnreferenced",
+        "Second",
+    ]
 
 
 def test_ppt_saved_twice_reads_the_newest_copy_of_each_slide(monkeypatch):
     def document(*slide_ids):
-        return _rec(0x03E8, ver=0xF, body=_rec(0x0FF0, ver=0xF, body=b"".join(
-            _rec(0x03F3, struct.pack("<IIiII", i, 0, 0, 256, 0)) for i in slide_ids)))
+        return _rec(
+            0x03E8,
+            ver=0xF,
+            body=_rec(
+                0x0FF0,
+                ver=0xF,
+                body=b"".join(
+                    _rec(0x03F3, struct.pack("<IIiII", i, 0, 0, 256, 0)) for i in slide_ids
+                ),
+            ),
+        )
 
     def slide(text):
         return _rec(0x03EE, _rec(0xF00D, _rec(0x0FA8, text)), ver=0xF)
 
-    data, edit = _ppt_stream([
-        {1: document(2), 2: slide(b"draft"), 3: slide(b"deleted later")},
-        {1: document(2, 4), 2: slide(b"final"), 4: slide(b"added")},
-    ])
+    data, edit = _ppt_stream(
+        [
+            {1: document(2), 2: slide(b"draft"), 3: slide(b"deleted later")},
+            {1: document(2, 4), 2: slide(b"final"), 4: slide(b"added")},
+        ]
+    )
     assert _ppt_slides(monkeypatch, data, edit) == ["final", "added"]
 
 
 def test_ppt_password_protected_or_looping_is_refused(monkeypatch):
     data, edit = _ppt_stream([{1: _rec(0x03E8, b"", ver=0xF)}])
-    streams = {"PowerPoint Document": data,
-               "Current User": _rec(0x0FF6, struct.pack("<III", 0x14, 0xF3D1C4DF, edit))}
+    streams = {
+        "PowerPoint Document": data,
+        "Current User": _rec(0x0FF6, struct.pack("<III", 0x14, 0xF3D1C4DF, edit)),
+    }
     monkeypatch.setattr(legacy, "_open", lambda blob: io.BytesIO())
     monkeypatch.setattr(legacy, "_stream", lambda ole, name: streams[name])
     with pytest.raises(ValueError, match="password-protected"):
@@ -418,15 +510,23 @@ def test_ppt_records_nested_past_the_limit_are_refused(monkeypatch):
     nested = _rec(0x0FA8, b"deep")
     for _ in range(legacy.MAX_DEPTH + 2):
         nested = _rec(0xF003, nested, ver=0xF)
-    document = _rec(0x03E8, ver=0xF, body=_rec(0x0FF0, ver=0xF, body=_rec(
-        0x03F3, struct.pack("<IIiII", 2, 0, 0, 256, 0))))
+    document = _rec(
+        0x03E8,
+        ver=0xF,
+        body=_rec(0x0FF0, ver=0xF, body=_rec(0x03F3, struct.pack("<IIiII", 2, 0, 0, 256, 0))),
+    )
     data, edit = _ppt_stream([{1: document, 2: _rec(0x03EE, nested, ver=0xF)}])
     with pytest.raises(ValueError, match="nested too deep"):
         _ppt_slides(monkeypatch, data, edit)
 
 
-def _doc(monkeypatch, pieces: list[tuple[str, bool]], body_chars: int, flags: int = 0x0200,
-         ident: int = 0xA5EC) -> str:
+def _doc(
+    monkeypatch,
+    pieces: list[tuple[str, bool]],
+    body_chars: int,
+    flags: int = 0x0200,
+    ident: int = 0xA5EC,
+) -> str:
     """A WordDocument + table stream holding `pieces` ((text, 8-bit?)) stored
     in reverse order, as a fast-saved file may."""
     word = bytearray(0x400)
@@ -444,8 +544,15 @@ def _doc(monkeypatch, pieces: list[tuple[str, bool]], body_chars: int, flags: in
         fc = stored[text] * 2 | 0x40000000 if compressed else stored[text]
         pcds += struct.pack("<HIH", 0, fc, 0)
     plc = struct.pack(f"<{len(cps)}I", *cps) + pcds
-    table = b"\xff" * 7 + b"\x01" + struct.pack("<H", 3) + b"abc" \
-        + b"\x02" + struct.pack("<I", len(plc)) + plc
+    table = (
+        b"\xff" * 7
+        + b"\x01"
+        + struct.pack("<H", 3)
+        + b"abc"
+        + b"\x02"
+        + struct.pack("<I", len(plc))
+        + plc
+    )
     struct.pack_into("<II", word, 0x1A2, 7, len(table) - 7)
     streams = {"WordDocument": bytes(word), "1Table": table}
     monkeypatch.setattr(legacy, "_open", lambda blob: io.BytesIO())
@@ -454,14 +561,15 @@ def _doc(monkeypatch, pieces: list[tuple[str, bool]], body_chars: int, flags: in
 
 
 def test_doc_pieces_are_joined_in_character_order_and_tidied(monkeypatch):
-    body = [("Caf\xe9 \x93quoted\x94\rsoft\x1fhy\x1ephen\x0bline\x0c", True),
-            ("हिन्दी \x13 HYPERLINK \"http://x\" \x14link\x15\r", False),
-            ("a\x07b\x07\x07\x07c\x07\x07\x01\x08\r", True),
-            ("\x13 PAGE \x13 nested \x14 1\x15\x15end\r", True)]
+    body = [
+        ("Caf\xe9 \x93quoted\x94\rsoft\x1fhy\x1ephen\x0bline\x0c", True),
+        ('हिन्दी \x13 HYPERLINK "http://x" \x14link\x15\r', False),
+        ("a\x07b\x07\x07\x07c\x07\x07\x01\x08\r", True),
+        ("\x13 PAGE \x13 nested \x14 1\x15\x15end\r", True),
+    ]
     footnotes = [("footnote text\r", True)]
     text = _doc(monkeypatch, body + footnotes, sum(len(t) for t, _ in body))
-    assert text == ("Café “quoted”\nsofthy-phen\nline\nहिन्दी link\n"
-                    "a | b\nc\n\nend")
+    assert text == ("Café “quoted”\nsofthy-phen\nline\nहिन्दी link\na | b\nc\n\nend")
 
 
 def test_doc_unclosed_fields_dont_make_field_removal_quadratic():
@@ -481,23 +589,26 @@ def test_doc_too_old_or_password_protected_is_refused(monkeypatch):
         _doc(monkeypatch, [("x", True)], 1, flags=0x0300)
 
 
-@pytest.mark.parametrize("url, video_id", [
-    ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-    ("https://m.youtube.com/watch?feature=share&v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-    ("https://youtu.be/dQw4w9WgXcQ?t=42", "dQw4w9WgXcQ"),
-    ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-    ("https://www.youtube.com/embed/dQw4w9WgXcQ?start=3", "dQw4w9WgXcQ"),
-    ("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-    ("https://youtube.com/live/dQw4w9WgXcQ?si=abc", "dQw4w9WgXcQ"),
-    (" https://youtu.be/dQw4w9WgXcQ ", "dQw4w9WgXcQ"),
-    ("https://www.youtube.com/@lecturer/live", None),
-    ("https://www.youtube.com/playlist?list=PL123", None),
-    ("https://www.youtube.com/watch", None),
-    ("https://notyoutu.be/dQw4w9WgXcQ", None),
-    ("https://example.com/?next=youtu.be/dQw4w9WgXcQ", None),
-    ("https://[bad", None),
-    (None, None),
-])
+@pytest.mark.parametrize(
+    "url, video_id",
+    [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://m.youtube.com/watch?feature=share&v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://youtu.be/dQw4w9WgXcQ?t=42", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/embed/dQw4w9WgXcQ?start=3", "dQw4w9WgXcQ"),
+        ("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://youtube.com/live/dQw4w9WgXcQ?si=abc", "dQw4w9WgXcQ"),
+        (" https://youtu.be/dQw4w9WgXcQ ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/@lecturer/live", None),
+        ("https://www.youtube.com/playlist?list=PL123", None),
+        ("https://www.youtube.com/watch", None),
+        ("https://notyoutu.be/dQw4w9WgXcQ", None),
+        ("https://example.com/?next=youtu.be/dQw4w9WgXcQ", None),
+        ("https://[bad", None),
+        (None, None),
+    ],
+)
 def test_youtube_video_id(url, video_id):
     assert youtube_video_id(url) == video_id
 
@@ -506,8 +617,13 @@ def test_youtube_video_id(url, video_id):
 
 
 class _Response:
-    def __init__(self, body: bytes, length: str | None,
-                 content_type: str = "application/pdf", url: str | None = None):
+    def __init__(
+        self,
+        body: bytes,
+        length: str | None,
+        content_type: str = "application/pdf",
+        url: str | None = None,
+    ):
         self.body = io.BytesIO(body)
         self.reads = 0
         self.url = url or "https://m.example/webservice/pluginfile.php/1/a.pdf"
@@ -537,10 +653,20 @@ class _Response:
 _PLUGINFILE = "https://m.example/webservice/pluginfile.php/1/a.pdf"
 
 
-def _download(monkeypatch, response: _Response, fileurl: str = _PLUGINFILE):
+def _patch_open(monkeypatch, open_fn):
+    """Route MoodleClient.download's opener.open to open_fn(req, timeout)."""
     import app.moodle as moodle
 
-    monkeypatch.setattr(moodle.urllib.request, "urlopen", lambda req, timeout: response)
+    class _Opener:
+        def open(self, req, timeout=None):
+            return open_fn(req, timeout)
+
+    monkeypatch.setattr(moodle.urllib.request, "build_opener", lambda *h: _Opener())
+
+
+def _download(monkeypatch, response: _Response, fileurl: str = _PLUGINFILE):
+
+    _patch_open(monkeypatch, lambda req, timeout: response)
     return MoodleClient("https://m.example", "tok").download(fileurl)
 
 
@@ -568,15 +694,15 @@ def test_download_within_the_cap(monkeypatch):
 
 
 def test_download_network_errors_stay_retryable(monkeypatch):
-    import app.moodle as moodle
 
     def boom(req, timeout):
         raise OSError("connection reset")
 
-    monkeypatch.setattr(moodle.urllib.request, "urlopen", boom)
+    _patch_open(monkeypatch, boom)
     with pytest.raises(MoodleError):
         MoodleClient("https://m.example", "tok").download(
-            "https://m.example/pluginfile.php/1/a.pdf")
+            "https://m.example/pluginfile.php/1/a.pdf"
+        )
 
 
 def test_download_keeps_an_html_file(monkeypatch):
@@ -607,9 +733,76 @@ def test_download_json_error_without_invalidtoken_is_retryable(monkeypatch):
     assert exc.value.errorcode == "filenotfound"
 
 
-def test_download_keeps_a_json_file_even_when_it_looks_like_an_error(monkeypatch):
-    body = b'{"error":"not moodle","errorcode":"invalidtoken"}'
+def _json_file_download(monkeypatch, body: bytes, site_info):
     fileurl = "https://m.example/webservice/pluginfile.php/1/notes.json"
     response = _Response(body, None, "application/json", url=fileurl)
-    blob, mime = _download(monkeypatch, response, fileurl)
+    monkeypatch.setattr(MoodleClient, "site_info", site_info)
+    return _download(monkeypatch, response, fileurl)
+
+
+def test_download_keeps_a_json_file_that_looks_like_an_error_when_token_is_live(monkeypatch):
+    body = b'{"error":"not moodle","errorcode":"invalidtoken"}'
+    blob, mime = _json_file_download(monkeypatch, body, lambda self: {"userid": 1})
     assert (blob, mime) == (body, "application/json")
+
+
+def test_download_json_file_error_body_with_dead_token_raises_token_rejected(monkeypatch):
+    body = b'{"exception":"moodle_exception","errorcode":"invalidtoken"}'
+
+    def dead(self):
+        raise TokenRejected("site_info: invalidtoken", errorcode="invalidtoken")
+
+    with pytest.raises(TokenRejected):
+        _json_file_download(monkeypatch, body, dead)
+
+
+def test_download_ordinary_json_file_skips_the_token_probe(monkeypatch):
+    body = b'{"title": "notes"}'
+
+    def probe(self):
+        raise AssertionError("site_info must not run for an ordinary file")
+
+    blob, _ = _json_file_download(monkeypatch, body, probe)
+    assert blob == body
+
+
+def test_redirect_handler_refuses_a_foreign_destination():
+    import urllib.request
+
+    import app.moodle as moodle
+
+    client = MoodleClient("https://m.example", "tok")
+    handler = moodle._ServedRedirects(client.serves)
+    req = urllib.request.Request(_PLUGINFILE)
+    for target in (
+        "https://evil.example/pluginfile.php/1/a.pdf",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://m.example/login/index.php",
+    ):
+        with pytest.raises(moodle._RedirectRefused):
+            handler.redirect_request(req, None, 302, "Found", {}, target)
+
+
+def test_redirect_handler_follows_a_pluginfile_destination():
+    import urllib.request
+
+    import app.moodle as moodle
+
+    client = MoodleClient("https://m.example", "tok")
+    handler = moodle._ServedRedirects(client.serves)
+    req = urllib.request.Request(_PLUGINFILE)
+    new = handler.redirect_request(
+        req, None, 302, "Found", {}, "https://m.example/pluginfile.php/1/b.pdf"
+    )
+    assert new is not None and new.full_url.endswith("/pluginfile.php/1/b.pdf")
+
+
+def test_download_refused_redirect_reads_as_a_login_page(monkeypatch):
+    import app.moodle as moodle
+
+    def refuse(req, timeout):
+        raise moodle._RedirectRefused("https://sso.example/login")
+
+    _patch_open(monkeypatch, refuse)
+    with pytest.raises(MoodleError, match="login page"):
+        MoodleClient("https://m.example", "tok").download(_PLUGINFILE)

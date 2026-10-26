@@ -57,7 +57,8 @@ happened. Capture, in this order:
       `~/.railway/sessions/*.session` and any project token in shell history,
       then log in again with MFA. Rotate any GitHub token used from it.
 - [ ] Put `web` into maintenance/offline once the snapshot exists, and keep
-      it offline until 4b is complete. Forged sessions stay valid until then.
+      it offline until 4e. Forged sessions stay valid until 4b, and the other
+      credentials in 4c/4d stay usable until you have rotated them.
 
 ## 4. Rotate, in this order
 
@@ -83,8 +84,8 @@ Keep `web` offline; do not redeploy it yet. `lockdown` only bumps
 carried in the cookie, so a holder of the leaked `SECRET_KEY` can sign a
 cookie with the new version and it is accepted until 4b. Lockdown stops old
 cookies, not forged ones. (`lockdown` runs as a one-off command and does not
-need `web` online.) Restart/redeploy **all** services together after 4b so
-nothing holds an old session.
+need `web` online.) Bring `web` back only at 4e, after every secret is
+rotated.
 
 `--keep-moodle` leaves Moodle tokens stored; `--no-google-revoke` clears
 without calling Google (only if Google is unreachable — delete the OAuth
@@ -99,10 +100,11 @@ secrets) in the `outstanding_grants` table and the exit code reads that.
 |---|---|---|
 | Google grant Google could not be asked about or did not confirm (unreachable, `--no-google-revoke`, token no longer decrypts) | `google` | Delete the OAuth client at Google (4c) or revoke the grants, then re-run with `--google-revoked` |
 | Any per-user Moodle token (forgotten here, or kept with `--keep-moodle`): the app cannot revoke them | `moodle` | Delete them in Moodle (Site administration → Server → Web services → Manage tokens), then re-run with `--moodle-revoked` |
-| Shared `GOOGLE_REFRESH_TOKEN` not revoked / shared `MOODLE_TOKEN` | nothing: the variable is still set on every run | Replace or unset it, or pass `--google-revoked` / `--moodle-revoked` |
+| Shared `GOOGLE_REFRESH_TOKEN` not revoked / shared `MOODLE_TOKEN` | nothing: the variable is still set on every run | First replace or unset the variable on every service **and** finish the provider side (revoke the grant at Google; delete the token in Moodle). Only then pass `--google-revoked` / `--moodle-revoked`: the flag is accepted on your word and does not unset or revoke anything |
 
 A grant Google confirms revoked is never recorded. The two flags are your
-word that the grants were removed outside the app: they clear every record
+word that the grants were removed outside the app, so pass them only after
+that cleanup is actually done: they clear every record
 of that provider and the run prints how many it took on trust. Each flag
 only covers its own provider. The records are not tied to the user row, so
 deleting an account does not erase them. `--dry-run` writes nothing and
@@ -117,8 +119,8 @@ openssl rand -hex 32
 Set the new value on **every** service (web, worker, sync-cron,
 pipeline-cron — they must match; `scripts/railway-sync-cron-env.sh`). This
 invalidates every session (including any forged with the old key),
-unsubscribe link, and remaining encrypted token. Only now bring `web` back,
-redeploying all services together (see 4e).
+unsubscribe link, and remaining encrypted token. Keep `web` offline: the
+credentials in 4c and 4d are still usable until rotated. It comes back at 4e.
 Users will sign in again and reconnect Moodle under Settings.
 
 ### 4c. Google OAuth
@@ -141,7 +143,7 @@ does not return: myaccount.google.com/permissions.
 
 | Secret | Action | User impact |
 |---|---|---|
-| `DATABASE_URL` | `ALTER ROLE <user> PASSWORD '<new>';`, update every service, redeploy; confirm no public TCP proxy on the Postgres service. Check `pg_roles` for new roles first. | None if cut over cleanly. |
+| `DATABASE_URL` | Check `pg_roles` for new roles first. Set the new password with psql's `\password <user>` (hashes client-side; a literal `ALTER ROLE ... PASSWORD '...'` leaves the plaintext in psql history and server logs). Update `DATABASE_URL` on every service (`web` stays offline). **Then end the existing sessions**, because a password change does not close connections already authenticated: from another admin role, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '<user>' AND pid <> pg_backend_pid();`. If the provider does not let you terminate backends, isolate the database (remove the public TCP proxy, restart the Postgres service) and confirm with `pg_stat_activity` that only your services are connected. | None if cut over cleanly. |
 | `MOODLE_TOKEN` (global) | Delete the token in Moodle (Site administration → Server → Web services → Manage tokens). | Only `MOODLE_TOKEN_OWNER`. |
 | Per-user Moodle tokens | Delete them in the same Moodle token list. `lockdown` only forgets our copy; the tokens stay valid at Moodle until removed there, and it keeps exiting 1 until you confirm with `--moodle-revoked`. | Users reconnect at Settings → Moodle. |
 | `RESEND_API_KEY` | Revoke and recreate; check sent mail for phishing; review domain DNS/DKIM. | None. |
@@ -151,7 +153,10 @@ does not return: myaccount.google.com/permissions.
 
 ### 4e. Deploy clean
 
-Redeploy from a known-good commit after all secrets are changed. Verify
+Only after every secret above is changed (including 4d: `DATABASE_URL` with
+old sessions terminated, `MOODLE_TOKEN`, `RESEND_API_KEY`, `LLM_API_KEY`),
+redeploy **all** services together from a known-good commit and bring `web`
+back online. Verify
 `/version` matches `git rev-parse origin/master` and that no service has
 extra start commands or variables you did not set.
 

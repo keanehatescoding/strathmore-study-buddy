@@ -15,13 +15,13 @@ import urllib.request
 from dataclasses import dataclass, replace
 
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, func, select, update
+from sqlmodel import Session, delete, func, select, update
 
 from app.classroom import SCOPES as CLASSROOM_SCOPES
 from app.config import settings
 from app.crypto import seal, unseal
 from app.drive import SCOPE as DRIVE_SCOPE
-from app.models import Course, User
+from app.models import Course, OutstandingGrant, User
 
 # drive.readonly: Classroom materials are mostly Drive files (app.drive)
 LOGIN_SCOPES = ["openid", "email", "profile", *CLASSROOM_SCOPES, DRIVE_SCOPE]
@@ -256,6 +256,31 @@ class LockdownReport:
     # were told to keep is still live and still stored (moodle_kept)
     moodle_cleared: int = 0
     moodle_kept: int = 0
+    # Durable state, read back from `outstanding_grants` after the run, so a
+    # retry still sees what an earlier run left live: grants not yet proven
+    # dead or acknowledged. This, not the per-run counts above, decides whether
+    # containment is complete.
+    google_outstanding: int = 0
+    moodle_outstanding: int = 0
+    outstanding: tuple[tuple[str, str, str], ...] = ()  # (provider, email, reason)
+    # markers this run cleared on the operator's explicit say-so
+    google_acknowledged: int = 0
+    moodle_acknowledged: int = 0
+
+
+def _mark_outstanding(session: Session, provider: str, email: str, reason: str) -> None:
+    """Record (uncommitted: the caller commits it with the token it clears, so
+    a crash can't lose the token and the record separately)."""
+    row = session.exec(
+        select(OutstandingGrant).where(
+            OutstandingGrant.provider == provider, OutstandingGrant.email == email
+        )
+    ).first()
+    if row is None:
+        session.add(OutstandingGrant(provider=provider, email=email, reason=reason))
+    else:
+        row.reason = reason
+        session.add(row)
 
 
 def lock_down(
@@ -264,6 +289,8 @@ def lock_down(
     revoke_google: bool = True,
     keep_moodle: bool = False,
     dry_run: bool = False,
+    ack_google: bool = False,
+    ack_moodle: bool = False,
 ) -> LockdownReport:
     """Incident response: sign everyone out and forget every stored credential.
 
@@ -287,6 +314,16 @@ def lock_down(
     Either way they are counted (`moodle_cleared` / `moodle_kept`, plus
     `shared_moodle`) so a caller treating this as incident containment can
     refuse to call it complete until the operator has revoked them in Moodle.
+
+    What this leaves live is also written to `outstanding_grants` (non-secret:
+    provider, email, reason) in the same commit that forgets the token, and
+    read back into `google_outstanding` / `moodle_outstanding`. A retry, which
+    finds the tokens already gone, therefore still reports them. A grant Google
+    confirmed revoked gets no record; every other record is removed only by
+    `ack_google` / `ack_moodle`: the operator's statement that the grants of
+    that provider were removed outside the app (OAuth client deleted, tokens
+    deleted in Moodle). The shared env-var fallbacks need no records: the
+    variable is still set on every run until the operator removes it.
     """
     report = LockdownReport(users=0, cleared=0, google_revoked=0, google_failed=0, undecryptable=0)
     if not dry_run:
@@ -298,21 +335,29 @@ def lock_down(
     for user in users:
         sealed = user.google_refresh_token
         token = refresh_token_for(user) if sealed else None
+        google_reason = None
         if sealed and token is None:
             report = replace(report, undecryptable=report.undecryptable + 1)
+            google_reason = "undecryptable"
         # counted before the skip below and in a dry run too: it says what a
         # real run would leave live at Moodle
+        moodle_reason = None
         if user.moodle_token is not None:
+            moodle_reason = "kept" if keep_moodle else "forgotten"
             if keep_moodle:
                 report = replace(report, moodle_kept=report.moodle_kept + 1)
             else:
                 report = replace(report, moodle_cleared=report.moodle_cleared + 1)
         if sealed is None and (keep_moodle or user.moodle_token is None):
+            if moodle_reason and not dry_run:  # kept: still live, so on record
+                _mark_outstanding(session, "moodle", user.email, moodle_reason)
+                session.commit()
             continue
         report = replace(report, users=report.users + 1)
         # counted in a dry run too: it says what a real run would leave live
         if token is not None and not revoke_google:
             report = replace(report, google_skipped=report.google_skipped + 1)
+            google_reason = "not-revoked"
         if dry_run:
             report = replace(report, cleared=report.cleared + 1)
             continue
@@ -322,6 +367,13 @@ def lock_down(
                 report = replace(report, google_revoked=report.google_revoked + 1)
             else:
                 report = replace(report, google_failed=report.google_failed + 1)
+                google_reason = "revoke-failed"
+        # the records go in the same commit as the cleared tokens: a crash
+        # can't forget a grant without remembering that it may still be live
+        if google_reason:
+            _mark_outstanding(session, "google", user.email, google_reason)
+        if moodle_reason:
+            _mark_outstanding(session, "moodle", user.email, moodle_reason)
         user.google_refresh_token = None
         if not keep_moodle:
             user.moodle_token = None
@@ -340,7 +392,27 @@ def lock_down(
                 report = replace(report, shared_google_failed=1)
     if settings.moodle_token.strip():
         report = replace(report, shared_moodle=True)
-    return report
+    if not dry_run:
+        # the operator's say-so that these grants were removed outside the app
+        for provider, ack, field in (
+            ("google", ack_google, "google_acknowledged"),
+            ("moodle", ack_moodle, "moodle_acknowledged"),
+        ):
+            if ack:
+                gone = session.exec(
+                    delete(OutstandingGrant).where(OutstandingGrant.provider == provider)
+                )
+                report = replace(report, **{field: gone.rowcount})
+        session.commit()
+    rows = session.exec(
+        select(OutstandingGrant).order_by(OutstandingGrant.provider, OutstandingGrant.email)
+    ).all()
+    return replace(
+        report,
+        google_outstanding=sum(r.provider == "google" for r in rows),
+        moodle_outstanding=sum(r.provider == "moodle" for r in rows),
+        outstanding=tuple((r.provider, r.email, r.reason) for r in rows),
+    )
 
 
 def claim_unowned(session: Session, user: User, source: str | None = None) -> tuple[int, int]:

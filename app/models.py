@@ -42,6 +42,33 @@ class User(SQLModel, table=True):
     )
 
 
+class OutstandingGrant(SQLModel, table=True):
+    """An external grant `lock_down` could not prove dead: a Google grant it
+    could not revoke (failed, skipped, or undecryptable), or a Moodle token it
+    forgot or kept (Moodle's API cannot revoke those). Non-secret by design:
+    just who and why. It is deliberately not tied to `users`: deleting the
+    account must not erase the record that its grant may still be live. Rows
+    go only on a successful Google revocation or the operator's explicit
+    acknowledgement (`admin_cli lockdown --google-revoked/--moodle-revoked`),
+    so a retried lockdown can't report containment the first run never
+    achieved."""
+
+    __tablename__ = "outstanding_grants"
+    __table_args__ = (
+        UniqueConstraint("provider", "email", name="uq_outstanding_grants_provider_email"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    provider: str  # "google" | "moodle"
+    email: str
+    # google: "revoke-failed" | "not-revoked" | "undecryptable";
+    # moodle: "forgotten" | "kept"
+    reason: str
+    created_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
 class Course(SQLModel, table=True):
     __tablename__ = "courses"
     __table_args__ = (
@@ -89,9 +116,7 @@ class Resource(SQLModel, table=True):
     # consecutive failed pipeline tries (download/chunking) and when the next
     # may run, so a dead download or a failing LLM call isn't redone every run
     attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
-    retry_after: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(timezone=True))
-    )
+    retry_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
 
 
 class Assignment(SQLModel, table=True):
@@ -106,9 +131,7 @@ class Assignment(SQLModel, table=True):
     source: str = Field(default="moodle")
     source_id: str = Field(index=True)
     title: str
-    due_date: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(timezone=True))
-    )
+    due_date: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     description: Optional[str] = Field(default=None, sa_column=Column(Text))
 
 
@@ -130,8 +153,7 @@ class QuizAttempt(SQLModel, table=True):
 
     __tablename__ = "quiz_attempts"
 
-    chunk_id: uuid.UUID = Field(foreign_key="chunks.id", primary_key=True,
-                                ondelete="CASCADE")
+    chunk_id: uuid.UUID = Field(foreign_key="chunks.id", primary_key=True, ondelete="CASCADE")
     attempt: int = Field(primary_key=True)
 
 
@@ -142,13 +164,10 @@ class QuizFailure(SQLModel, table=True):
 
     __tablename__ = "quiz_failures"
 
-    chunk_id: uuid.UUID = Field(foreign_key="chunks.id", primary_key=True,
-                                ondelete="CASCADE")
+    chunk_id: uuid.UUID = Field(foreign_key="chunks.id", primary_key=True, ondelete="CASCADE")
     attempt: int = Field(primary_key=True)
     failures: int = Field(default=0)
-    retry_after: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(timezone=True))
-    )
+    retry_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     error: Optional[str] = Field(default=None)
 
 
@@ -174,9 +193,7 @@ class ReviewState(SQLModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     user_id: uuid.UUID = Field(foreign_key="users.id", index=True)
-    quiz_item_id: uuid.UUID = Field(
-        foreign_key="quiz_items.id", index=True, ondelete="CASCADE"
-    )
+    quiz_item_id: uuid.UUID = Field(foreign_key="quiz_items.id", index=True, ondelete="CASCADE")
     ease_factor: float = Field(default=2.5)
     interval_days: int = Field(default=0)
     next_review_date: datetime = Field(
@@ -185,9 +202,7 @@ class ReviewState(SQLModel, table=True):
     last_result: Optional[str] = Field(default=None)
     repetitions: int = Field(default=0)
     lapses: int = Field(default=0)
-    answered_at: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(timezone=True))
-    )
+    answered_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     # when the item left the "new" pool; feeds the daily new-item cap
     first_answered_at: Optional[datetime] = Field(
         default=None, sa_column=Column(DateTime(timezone=True))
@@ -208,9 +223,7 @@ class ItemFlag(SQLModel, table=True):
     quiz_item_id: uuid.UUID = Field(
         foreign_key="quiz_items.id", primary_key=True, index=True, ondelete="CASCADE"
     )
-    skipped_at: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(timezone=True))
-    )
+    skipped_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     suspended_at: Optional[datetime] = Field(
         default=None, sa_column=Column(DateTime(timezone=True))
     )
@@ -235,9 +248,7 @@ class ReviewLog(SQLModel, table=True):
     )
     verdict: str  # srs.verdict(): correct | partial | incorrect
     partial_credit: Optional[float] = Field(default=None)  # NULL on backfilled rows
-    answered_at: datetime = Field(
-        sa_column=Column(DateTime(timezone=True), nullable=False)
-    )
+    answered_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
 class NotificationEvent(SQLModel, table=True):
@@ -251,9 +262,7 @@ class NotificationEvent(SQLModel, table=True):
         default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
     )
     sent: bool = Field(default=False, index=True)
-    sent_at: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(timezone=True))
-    )
+    sent_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     # Multi-email batch this event was last sent in; kept so an ambiguous
     # failure is retried as the same batch. "b2-..." only groups (the key is
     # derived from the payload); legacy "batch-..." was the Idempotency-Key.
@@ -277,7 +286,9 @@ class Job(SQLModel, table=True):
         # At most one queued/running notify job, so racing workers can't both
         # enqueue one and double-send (see app.worker).
         Index(
-            "uq_jobs_active_notify", "type", unique=True,
+            "uq_jobs_active_notify",
+            "type",
+            unique=True,
             postgresql_where=text(ACTIVE_NOTIFY_WHERE),
             sqlite_where=text(ACTIVE_NOTIFY_WHERE),
         ),
@@ -286,8 +297,10 @@ class Job(SQLModel, table=True):
         # up (app.jobs._enqueue_once); the sync handler runs them one at a
         # time. `->>` works on Postgres json and SQLite >= 3.38 alike.
         Index(
-            "uq_jobs_active_user_job", "type",
-            text("(payload ->> 'source')"), text("(payload ->> 'user_email')"),
+            "uq_jobs_active_user_job",
+            "type",
+            text("(payload ->> 'source')"),
+            text("(payload ->> 'user_email')"),
             text("(COALESCE(payload ->> 'course_id', ''))"),
             unique=True,
             postgresql_where=text(ACTIVE_USER_JOB_WHERE),

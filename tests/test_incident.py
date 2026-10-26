@@ -13,7 +13,7 @@ from sqlmodel import Session, SQLModel, select
 from app import auth as auth_mod
 from app.config import settings
 from app.crypto import seal
-from app.models import User
+from app.models import OutstandingGrant, User
 from tests.dbutil import make_engine
 
 GOOGLE_PURPOSE = "google-refresh-token"
@@ -83,7 +83,14 @@ def test_lock_down_signs_everyone_out_and_forgets_every_credential(session, goog
     report = auth_mod.lock_down(session)
 
     assert report == auth_mod.LockdownReport(
-        users=2, cleared=2, google_revoked=1, google_failed=0, undecryptable=0, moodle_cleared=2
+        users=2,
+        cleared=2,
+        google_revoked=1,
+        google_failed=0,
+        undecryptable=0,
+        moodle_cleared=2,
+        moodle_outstanding=2,
+        outstanding=(("moodle", "a@x.edu", "forgotten"), ("moodle", "b@x.edu", "forgotten")),
     )
     session.expire_all()
     assert all(u.session_version == 1 for u in session.exec(select(User)).all())
@@ -361,3 +368,149 @@ def test_admin_cli_lockdown_dry_run_with_no_google_revoke_promises_no_revocation
     # a dry run reports, it doesn't fail automation and changes nothing
     session.expire_all()
     assert all(u.session_version == 0 for u in session.exec(select(User)).all())
+
+
+# -- retries: what an earlier run left live must outlive the cleared tokens --
+
+
+def _outstanding(session):
+    session.expire_all()
+    return sorted(
+        (r.provider, r.email, r.reason) for r in session.exec(select(OutstandingGrant)).all()
+    )
+
+
+def _ok(monkeypatch, session, *argv):
+    """Run the CLI and require exit 0 (main() only raises SystemExit to fail)."""
+    _run_cli(monkeypatch, session, "lockdown", *argv)
+
+
+def _fails(monkeypatch, session, capsys, *argv):
+    with pytest.raises(SystemExit) as exit_:
+        _run_cli(monkeypatch, session, "lockdown", *argv)
+    assert exit_.value.code == 1
+    return capsys.readouterr().out
+
+
+def test_retry_after_failed_google_revocation_still_fails(session, google, monkeypatch, capsys):
+    session.add(User(email="a@x.edu", google_refresh_token=seal(GOOGLE_PURPOSE, "rt-a")))
+    session.commit()
+    google["down"] = True
+    _fails(monkeypatch, session, capsys)
+    assert _outstanding(session) == [("google", "a@x.edu", "revoke-failed")]
+
+    # the token is gone now: the second run has nothing to revoke, and must
+    # still not call that containment
+    google["down"] = False
+    out = _fails(monkeypatch, session, capsys)
+    assert "outstanding: google" in out and "a@x.edu" in out
+    assert google["revoked"] == []
+
+
+def test_retry_after_no_google_revoke_still_fails(session, google, monkeypatch, capsys):
+    _users(session)
+    _fails(monkeypatch, session, capsys, "--no-google-revoke", "--moodle-revoked")
+    assert _outstanding(session) == [("google", "a@x.edu", "not-revoked")]
+    _fails(monkeypatch, session, capsys, "--moodle-revoked")
+
+
+def test_retry_after_undecryptable_token_still_fails(session, google, monkeypatch, capsys):
+    session.add(User(email="a@x.edu", google_refresh_token=seal(GOOGLE_PURPOSE, "rt-a")))
+    session.commit()
+    monkeypatch.setattr(auth_mod.settings, "secret_key", "rotated")
+    _fails(monkeypatch, session, capsys)
+    assert _outstanding(session) == [("google", "a@x.edu", "undecryptable")]
+    _fails(monkeypatch, session, capsys)
+
+
+def test_retry_after_forgotten_moodle_tokens_still_fails(session, google, monkeypatch, capsys):
+    session.add(User(email="m@x.edu", moodle_token="v1:sealed-moodle"))
+    session.commit()
+    _fails(monkeypatch, session, capsys)
+    session.expire_all()
+    assert session.exec(select(User)).one().moodle_token is None
+    assert _outstanding(session) == [("moodle", "m@x.edu", "forgotten")]
+    # no tokens left in any row, the record alone keeps it failing
+    out = _fails(monkeypatch, session, capsys)
+    assert "outstanding: moodle" in out and "m@x.edu" in out
+
+
+def test_moodle_ack_clears_only_moodle_records(session, google, monkeypatch, capsys):
+    _users(session)
+    google["down"] = True
+    _fails(monkeypatch, session, capsys)
+    assert {p for p, _, _ in _outstanding(session)} == {"google", "moodle"}
+
+    google["down"] = False
+    _fails(monkeypatch, session, capsys, "--moodle-revoked")  # google still live
+    assert _outstanding(session) == [("google", "a@x.edu", "revoke-failed")]
+    _ok(monkeypatch, session, "--google-revoked")
+    assert _outstanding(session) == []
+    _ok(monkeypatch, session)  # and it stays contained
+
+
+def test_acknowledging_one_provider_does_not_hide_the_other(session, google, monkeypatch, capsys):
+    _users(session)
+    google["down"] = True
+    _fails(monkeypatch, session, capsys, "--google-revoked")
+    assert {p for p, _, _ in _outstanding(session)} == {"moodle"}
+    _ok(monkeypatch, session, "--moodle-revoked")
+
+
+def test_ack_prints_what_it_took_on_trust(session, google, monkeypatch, capsys):
+    _users(session)
+    _ok(monkeypatch, session, "--moodle-revoked")
+    assert "--moodle-revoked: cleared 2 record(s)" in capsys.readouterr().out
+
+
+def test_record_survives_deleting_the_account(session, google, monkeypatch, capsys):
+    from app.account import delete_account
+
+    _users(session)
+    _fails(monkeypatch, session, capsys)
+    user = session.exec(select(User).where(User.email == "b@x.edu")).one()
+    delete_account(session, user)
+    assert ("moodle", "b@x.edu", "forgotten") in _outstanding(session)
+    _fails(monkeypatch, session, capsys, "--google-revoked")
+
+
+def test_keep_moodle_leaves_a_record_even_for_a_user_with_nothing_else(
+    session, google, monkeypatch, capsys
+):
+    session.add(User(email="m@x.edu", moodle_token="v1:sealed-moodle"))
+    session.commit()
+    _fails(monkeypatch, session, capsys, "--keep-moodle")
+    assert _outstanding(session) == [("moodle", "m@x.edu", "kept")]
+    # a later run that forgets the token updates the one record, no duplicate
+    _fails(monkeypatch, session, capsys)
+    assert _outstanding(session) == [("moodle", "m@x.edu", "forgotten")]
+
+
+def test_records_hold_no_secrets(session, google, monkeypatch, capsys):
+    _users(session)
+    google["down"] = True
+    _fails(monkeypatch, session, capsys)
+    dumped = repr(session.exec(select(OutstandingGrant)).all())
+    assert "rt-a" not in dumped and "sealed-moodle" not in dumped
+
+
+def test_dry_run_writes_no_records_and_reports_earlier_ones(session, google, monkeypatch, capsys):
+    _users(session)
+    _run_cli(monkeypatch, session, "lockdown", "--dry-run")
+    assert _outstanding(session) == []
+
+    _fails(monkeypatch, session, capsys)
+    capsys.readouterr()
+    _run_cli(monkeypatch, session, "lockdown", "--dry-run")  # reports, never fails
+    assert "outstanding: moodle" in capsys.readouterr().out
+    assert len(_outstanding(session)) == 2  # and a dry run clears nothing
+
+
+def test_shared_tokens_need_no_records_and_stay_unacknowledged_until_told(
+    session, google, monkeypatch, capsys
+):
+    monkeypatch.setattr(settings, "moodle_token", "shared-moodle")
+    _fails(monkeypatch, session, capsys)
+    assert _outstanding(session) == []
+    _fails(monkeypatch, session, capsys)  # still set, still not contained
+    _ok(monkeypatch, session, "--moodle-revoked")

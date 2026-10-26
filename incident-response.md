@@ -56,8 +56,8 @@ happened. Capture, in this order:
 - [ ] Local machine: `railway logout`, delete
       `~/.railway/sessions/*.session` and any project token in shell history,
       then log in again with MFA. Rotate any GitHub token used from it.
-- [ ] Put `web` into maintenance/offline once the snapshot exists. Forged
-      sessions stay valid until step 4.
+- [ ] Put `web` into maintenance/offline once the snapshot exists, and keep
+      it offline until 4b is complete. Forged sessions stay valid until then.
 
 ## 4. Rotate, in this order
 
@@ -78,7 +78,14 @@ railway run --service web --environment production \
 (`railway ssh` into the web service and run the same command there if
 `railway run` is unavailable.)
 
-Then restart/redeploy **all** services so nothing holds an old session.
+Keep `web` offline; do not redeploy it yet. `lockdown` only bumps
+`session_version`, which is a small integer stored in the database and
+carried in the cookie, so a holder of the leaked `SECRET_KEY` can sign a
+cookie with the new version and it is accepted until 4b. Lockdown stops old
+cookies, not forged ones. (`lockdown` runs as a one-off command and does not
+need `web` online.) Restart/redeploy **all** services together after 4b so
+nothing holds an old session.
+
 `--keep-moodle` leaves Moodle tokens stored; `--no-google-revoke` clears
 without calling Google (only if Google is unreachable — delete the OAuth
 client instead, below).
@@ -109,7 +116,9 @@ openssl rand -hex 32
 
 Set the new value on **every** service (web, worker, sync-cron,
 pipeline-cron — they must match; `scripts/railway-sync-cron-env.sh`). This
-invalidates every session, unsubscribe link, and remaining encrypted token.
+invalidates every session (including any forged with the old key),
+unsubscribe link, and remaining encrypted token. Only now bring `web` back,
+redeploying all services together (see 4e).
 Users will sign in again and reconnect Moodle under Settings.
 
 ### 4c. Google OAuth

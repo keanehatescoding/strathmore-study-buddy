@@ -36,10 +36,16 @@ happened. Capture, in this order:
 - [ ] Which code is actually running: `curl -s https://<app-host>/version`
       returns the deployed commit. Compare with `git rev-parse origin/master`.
       A mismatch means someone deployed with `railway up`; keep that image/log.
-- [ ] Database snapshot: `pg_dump --no-owner "$DATABASE_URL" > incident.dump`
-      (or the Railway backup). Do this before any rotation.
+- [ ] Database snapshot: `pg_dump --no-owner "$DATABASE_URL" > incident.dump`.
+      If the Railway database is private-only, `pg_dump` from your machine
+      will fail to connect: use the Railway backup instead, and do not open
+      a public TCP proxy just to dump it. Do this before any rotation.
 - [ ] DB audit: `psql "$DATABASE_URL" -f scripts/incident_audit.sql >
-      incident-db-audit.txt` (edit `since` in the file first).
+      incident-db-audit.txt` (edit `since` in the file first). If the
+      database is private-only, run `railway connect Postgres` (as the
+      header of `scripts/incident_audit.sql` says), then inside psql:
+      `\o incident-db-audit.txt` and `\i scripts/incident_audit.sql`, so the
+      output is saved with the rest of the evidence.
 - [ ] Mail log from Resend (sends you did not trigger), LLM usage/billing,
       Google Cloud audit log for the OAuth client (Workspace:
       admin.google.com → Reports → Audit log → OAuth log events).

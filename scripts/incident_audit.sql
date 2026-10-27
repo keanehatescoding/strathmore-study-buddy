@@ -1,10 +1,11 @@
 -- Incident audit for the Study Buddy Postgres database.
 --
 -- Read-only. Run with psql as the database owner (Railway: `railway connect
--- Postgres`, or `psql "$DATABASE_URL"`), then save the output with the rest of
--- the evidence:
+-- Postgres`, or `psql "service=incident"`; keep the password out of the
+-- command line, see docs/incident-response.md), then save the output into a
+-- new evidence directory, never over an earlier file:
 --
---   psql "$DATABASE_URL" -f scripts/incident_audit.sql > incident-db-audit.txt
+--   psql "service=incident" -f scripts/incident_audit.sql > "$IR/db-audit.txt"
 --
 -- Set `since` to the earliest moment the platform may have been compromised,
 -- before running. Everything after it is worth explaining.

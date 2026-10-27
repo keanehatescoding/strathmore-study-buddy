@@ -36,16 +36,29 @@ happened. Capture, in this order:
 - [ ] Which code is actually running: `curl -s https://<app-host>/version`
       returns the deployed commit. Compare with `git rev-parse origin/master`.
       A mismatch means someone deployed with `railway up`; keep that image/log.
-- [ ] Database snapshot: `pg_dump --no-owner "$DATABASE_URL" > incident.dump`.
-      If the Railway database is private-only, `pg_dump` from your machine
-      will fail to connect: use the Railway backup instead, and do not open
-      a public TCP proxy just to dump it. Do this before any rotation.
-- [ ] DB audit: `psql "$DATABASE_URL" -f scripts/incident_audit.sql >
-      incident-db-audit.txt` (edit `since` in the file first). If the
-      database is private-only, run `railway connect Postgres` (as the
-      header of `scripts/incident_audit.sql` says), then inside psql:
-      `\o incident-db-audit.txt` and `\i scripts/incident_audit.sql`, so the
-      output is saved with the rest of the evidence.
+- [ ] Evidence directory and DB access, set up once per attempt (a retry
+      starts a new directory, so it can never overwrite earlier evidence):
+      `set -o noclobber; IR="incident-$(date -u +%Y%m%dT%H%M%SZ)"; mkdir "$IR"`
+      (`mkdir` fails if it exists; `noclobber` makes every `>` refuse an
+      existing file). Keep a failed attempt's directory as it is. Do not put
+      the password in a command line, where `ps` shows it to other local
+      users: write `host`, `port`, `dbname`, `user` and `password` from the
+      Railway variables into a `[incident]` section of a file made with
+      `umask 077; touch pg_service.incident` and edited in an editor, then
+      `export PGSERVICEFILE="$PWD/pg_service.incident"`. Delete the file
+      after rotation (4d).
+- [ ] Database snapshot: `pg_dump --no-owner "service=incident" >
+      "$IR/incident.dump"`. If the Railway database is private-only,
+      `pg_dump` from your machine will fail to connect: use the Railway
+      backup instead, and do not open a public TCP proxy just to dump it.
+      Do this before any rotation.
+- [ ] DB audit: `psql "service=incident" -f scripts/incident_audit.sql >
+      "$IR/db-audit.txt"` (edit `since` in the file first). If the database
+      is private-only, run `railway connect Postgres` (as the header of
+      `scripts/incident_audit.sql` says), then inside psql:
+      `\o incident-<timestamp>/db-audit.txt` (the new directory above) and
+      `\i scripts/incident_audit.sql`, so the output is saved with the rest
+      of the evidence.
 - [ ] Mail log from Resend (sends you did not trigger), LLM usage/billing,
       Google Cloud audit log for the OAuth client (Workspace:
       admin.google.com → Reports → Audit log → OAuth log events).

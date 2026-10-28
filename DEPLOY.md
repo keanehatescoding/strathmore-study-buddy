@@ -191,6 +191,12 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   Logging out ends the session server-side, so a copied cookie stops
   working too; `python -m app.admin_cli revoke-sessions EMAIL` signs an
   account out on every device (e.g. after a lost laptop).
+- If the host, `SECRET_KEY` or database may have been compromised, follow
+  `docs/incident-response.md`. The one command that cannot wait is
+  `python -m app.admin_cli lockdown` (dry run first): it signs everyone out,
+  revokes every stored Google grant and forgets every stored Google/Moodle
+  token. Run it **before** rotating `SECRET_KEY`, or the stored tokens stop
+  decrypting and their grants can only be killed by deleting the OAuth client.
 - A student can delete their account under Settings: their Google grant is
   revoked and their keys, courses, questions, review history and queued
   jobs are deleted (other students' copies of the same material stay).

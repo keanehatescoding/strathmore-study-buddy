@@ -3,9 +3,11 @@
 -- Read-only. Run with psql as the database owner (Railway: `railway connect
 -- Postgres`, or `psql "service=incident"`; keep the password out of the
 -- command line, see docs/incident-response.md), then save the output into a
--- new evidence directory, never over an earlier file:
+-- new evidence directory outside the repo, never over an earlier file, and
+-- keep stderr too (a failed query is part of the evidence):
 --
---   psql "service=incident" -f scripts/incident_audit.sql > "$IR/db-audit.txt"
+--   psql -X --set=ON_ERROR_STOP=on "service=incident" -f scripts/incident_audit.sql \
+--     > "$IR/db-audit.txt" 2> "$IR/db-audit.err"
 --
 -- Set `since` to the earliest moment the platform may have been compromised,
 -- before running. Everything after it is worth explaining.
@@ -14,6 +16,8 @@
 -- rows were *read*: only server/statement logs (log_statement=all) or the
 -- platform's audit log can show that. Do not treat a clean result here as
 -- "no data was accessed".
+
+\set ON_ERROR_STOP on
 
 \set since '2026-10-17 00:00:00+03'
 \pset pager off

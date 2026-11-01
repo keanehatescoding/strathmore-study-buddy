@@ -24,6 +24,7 @@
 \timing off
 
 \echo '== 1. context ========================================================'
+SELECT :'since'::timestamptz AS audit_since;
 SELECT current_database() AS database, current_user AS connected_as,
        inet_server_addr() AS server_addr, now() AS at;
 SELECT version();

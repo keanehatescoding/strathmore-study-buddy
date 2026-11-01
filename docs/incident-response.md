@@ -86,8 +86,13 @@ happened. Capture, in this order:
       `~/.railway/sessions/*.session` and any project token in shell history,
       then log in again with MFA. Rotate any GitHub token used from it.
 - [ ] Put `web` into maintenance/offline once the snapshot exists, and keep
-      it offline until 4e. Forged sessions stay valid until 4b, and the other
-      credentials in 4c/4d stay usable until you have rotated them.
+      it offline until 4e. Stop `worker`, `sync-cron` and `pipeline-cron` at
+      the same time and keep them stopped until 4e: Railway deploys each
+      service independently and a running process keeps the credentials it
+      loaded at start (the worker reads `MOODLE_TOKEN` once), so a service
+      left running would keep using an old credential after it is "rotated".
+      Forged sessions stay valid until 4b, and the other credentials in
+      4c/4d stay usable until you have rotated them.
 
 ## 4. Rotate, in this order
 
@@ -148,8 +153,9 @@ openssl rand -hex 32
 Set the new value on **every** service (web, worker, sync-cron,
 pipeline-cron — they must match; `scripts/railway-sync-cron-env.sh`). This
 invalidates every session (including any forged with the old key),
-unsubscribe link, and remaining encrypted token. Keep `web` offline: the
-credentials in 4c and 4d are still usable until rotated. It comes back at 4e.
+unsubscribe link, and remaining encrypted token. Keep `web`, `worker`,
+`sync-cron` and `pipeline-cron` stopped: the credentials in 4c and 4d are
+still usable until rotated. They come back at 4e.
 Users will sign in again and reconnect Moodle under Settings.
 
 ### 4c. Google OAuth
@@ -172,7 +178,7 @@ does not return: myaccount.google.com/permissions.
 
 | Secret | Action | User impact |
 |---|---|---|
-| `DATABASE_URL` | Check `pg_roles` for new roles first. Set the new password with psql's `\password <user>` (hashes client-side; a literal `ALTER ROLE ... PASSWORD '...'` leaves the plaintext in psql history and server logs). Update `DATABASE_URL` on every service (`web` stays offline). **Then end the existing sessions**, because a password change does not close connections already authenticated: from another admin role, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '<user>' AND pid <> pg_backend_pid();`. If the provider does not let you terminate backends, isolate the database (remove the public TCP proxy, restart the Postgres service) and confirm with `pg_stat_activity` that only your services are connected. | None if cut over cleanly. |
+| `DATABASE_URL` | Check `pg_roles` for new roles first. Set the new password with psql's `\password <user>` (hashes client-side; a literal `ALTER ROLE ... PASSWORD '...'` leaves the plaintext in psql history and server logs). Update `DATABASE_URL` on every service (they all stay stopped). **Then end the existing sessions**, because a password change does not close connections already authenticated: from another admin role, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '<user>' AND pid <> pg_backend_pid();`. If the provider does not let you terminate backends, isolate the database (remove the public TCP proxy, restart the Postgres service) and confirm with `pg_stat_activity` that only your services are connected. | None if cut over cleanly. |
 | `MOODLE_TOKEN` (global) | Delete the token in Moodle (Site administration → Server → Web services → Manage tokens). | Only `MOODLE_TOKEN_OWNER`. |
 | Per-user Moodle tokens | Delete them in the same Moodle token list. `lockdown` only forgets our copy; the tokens stay valid at Moodle until removed there, and it keeps exiting 1 until you confirm with `--moodle-revoked`. | Users reconnect at Settings → Moodle. |
 | `RESEND_API_KEY` | Revoke and recreate; check sent mail for phishing; review domain DNS/DKIM. | None. |
@@ -184,10 +190,11 @@ does not return: myaccount.google.com/permissions.
 
 Only after every secret above is changed (including 4d: `DATABASE_URL` with
 old sessions terminated, `MOODLE_TOKEN`, `RESEND_API_KEY`, `LLM_API_KEY`),
-redeploy **all** services together from a known-good commit and bring `web`
-back online. Verify
-`/version` matches `git rev-parse origin/master` and that no service has
-extra start commands or variables you did not set.
+redeploy `worker`, `sync-cron` and `pipeline-cron` from a known-good commit,
+one at a time, and wait for each deployment to report the clean commit. Then
+redeploy `web` and bring it online only once every other service has finished.
+Verify `/version` matches `git rev-parse origin/master` and that no service
+has extra start commands or variables you did not set.
 
 ## 5. Scope the exposure
 

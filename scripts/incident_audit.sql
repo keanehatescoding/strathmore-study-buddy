@@ -131,7 +131,7 @@ SELECT count(*) AS users,
        count(*) FILTER (WHERE created_at >= :'since') AS users_created_since
 FROM users;
 
-\echo '== 9. accounts created or changed in the window ======================'
+\echo '== 9. accounts created since the window start ========================'
 SELECT id, email, created_at, session_version, notify_email,
        google_refresh_token IS NOT NULL AS has_google_token,
        moodle_token IS NOT NULL AS has_moodle_token

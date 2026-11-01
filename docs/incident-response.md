@@ -40,7 +40,7 @@ happened. Capture, in this order:
       evidence **outside the repository** at an absolute, private path; a
       retry starts a new directory, so it can never overwrite earlier
       evidence:
-      `unset IR; umask 077; set -o noclobber; mkdir -p -m 700 "$HOME/incident-evidence" && chmod 700 "$HOME/incident-evidence" && IR="$(mktemp -d "$HOME/incident-evidence/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")" && echo "$IR"`
+      `unset IR && umask 077 && set -o noclobber && mkdir -p -m 700 "$HOME/incident-evidence" && chmod 700 "$HOME/incident-evidence" && IR="$(mktemp -d "$HOME/incident-evidence/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")" && echo "$IR"`
       (`mktemp -d` always creates a new directory with mode 0700, the `&&`
       chain prints nothing and returns non-zero if any step fails, and
       `chmod` tightens an `incident-evidence` directory that already

@@ -940,3 +940,86 @@ def test_rejected_shared_moodle_key_touches_no_user(session, user_id, monkeypatc
     with pytest.raises(NotConnectedError, match="shared MOODLE_TOKEN"):
         _moodle_job(session, monkeypatch, _RejectedKey())
     assert session.get(User, user_id).moodle_token is None
+
+
+# -- page text and the extraction cap (#133) ----------------------------------
+
+
+@pytest.fixture()
+def small_cap(monkeypatch):
+    import app.extract
+
+    monkeypatch.setattr(app.extract, "MAX_EXTRACTED_CHARS", 20)
+
+
+def _long_page(adapter, text):
+    adapter.resources[("c1", "t1")][1] = ResourceData(
+        "t1", "r-page", "page_text", "Overview", text=text)
+
+
+def test_new_page_text_is_capped_with_note(session, user_id, small_cap):
+    from app.extract import is_cap_note
+
+    adapter = FakeAdapter()
+    _long_page(adapter, "x" * 50)
+    sync_course(session, adapter, "c1", user_id)
+    page = _resource(session, "r-page")
+    assert page.extracted_text == "x" * 20
+    assert page.status == "extracted"
+    assert is_cap_note(page.error) and "20 of 50" in page.error
+
+    stats = sync_course(session, adapter, "c1", user_id)  # capped text is stable
+    assert stats.resources_updated == 0 and stats.resources_skipped == 3
+
+
+def test_short_page_text_has_no_note(session, user_id, small_cap):
+    sync_course(session, FakeAdapter(), "c1", user_id)
+    page = _resource(session, "r-page")
+    assert (page.extracted_text, page.error) == ("A tree is...", None)
+
+
+def test_changed_page_text_is_capped(session, user_id, small_cap):
+    from app.extract import is_cap_note
+
+    adapter = FakeAdapter()
+    sync_course(session, adapter, "c1", user_id)
+    _long_page(adapter, "y" * 50)
+    stats = sync_course(session, adapter, "c1", user_id)
+    assert stats.resources_updated == 1
+    session.expire_all()
+    page = _resource(session, "r-page")
+    assert page.extracted_text == "y" * 20 and is_cap_note(page.error)
+
+
+def test_uncapped_stored_page_is_capped_once(session, user_id, small_cap):
+    """A page stored before the cap applied at sync gets the capped text (and
+    its note) through the better-text refresh, then stays put."""
+    from app.extract import is_cap_note
+
+    adapter = FakeAdapter()
+    full = "z" * 15 + "tail" + "z" * 31
+    _long_page(adapter, full)
+    sync_course(session, adapter, "c1", user_id)
+    page = _resource(session, "r-page")
+    page.extracted_text, page.error, page.status = full, None, "chunked"
+    session.add_all([
+        page,
+        Chunk(resource_id=page.id, title="head", content="zzzzz", order=0,
+              start_char=0, end_char=5),
+        Chunk(resource_id=page.id, title="past", content="z" * 30, order=1,
+              start_char=20, end_char=50),
+    ])
+    session.commit()
+
+    stats = sync_course(session, adapter, "c1", user_id)
+    assert stats.resources_updated == 1
+    session.expire_all()
+    page = _resource(session, "r-page")
+    assert page.extracted_text == full[:20] and page.status == "chunked"
+    assert is_cap_note(page.error)
+    head, past = session.exec(select(Chunk).order_by(Chunk.order)).all()
+    assert (head.start_char, head.end_char) == (0, 5)
+    assert (past.start_char, past.end_char) == (None, None)  # cut off by the cap
+
+    stats = sync_course(session, adapter, "c1", user_id)
+    assert stats.resources_updated == 0

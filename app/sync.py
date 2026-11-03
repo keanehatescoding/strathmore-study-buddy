@@ -14,13 +14,19 @@ source stops listing are deleted (never off an empty or partial list).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from sqlmodel import Session, delete, func, select, update
 
-from app.extract import MAX_DOWNLOAD_BYTES, too_large_message, youtube_video_id
+from app.extract import (
+    MAX_DOWNLOAD_BYTES,
+    cap_text,
+    is_cap_note,
+    too_large_message,
+    youtube_video_id,
+)
 from app.models import (
     Assignment,
     Chunk,
@@ -288,12 +294,25 @@ def _legacy_hash_matches(adapter, data: ResourceData, legacy: str) -> bool | Non
     return hashlib.sha256(blob).hexdigest() == legacy
 
 
-def _fresh_state(r: ResourceData) -> dict[str, Any]:
+def _fresh_state(r: ResourceData, cap_note: str | None = None) -> dict[str, Any]:
     """Status/error for new or changed content. A file the source says is
-    over the download cap is skipped here, so extraction never fetches it."""
+    over the download cap is skipped here, so extraction never fetches it.
+    Text stored at sync is already extracted: its cap note, if any, is kept
+    in error like run_extraction keeps it."""
     if r.size is not None and r.size > MAX_DOWNLOAD_BYTES:
         return {"status": "skipped", "error": too_large_message()}
-    return {"status": "extracted" if r.text else "pending", "error": None}
+    if r.text:
+        return {"status": "extracted", "error": cap_note}
+    return {"status": "pending", "error": None}
+
+
+def _capped(r: ResourceData) -> tuple[ResourceData, str | None]:
+    """Page text skips run_extraction, so cap it here (after content_hash has
+    seen the full text, keeping stored hashes stable)."""
+    if r.text is None:
+        return r, None
+    text, note = cap_text(r.text)
+    return replace(r, text=text), note
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -351,6 +370,7 @@ def sync_course(
     for topic_source_id, topic_id in topic_id_by_source.items():
         for r in adapter.fetch_resources(course_source_id, topic_source_id):
             digest = content_hash(r)
+            r, cap_note = _capped(r)
             rows = by_source_id.get(r.source_id, [])
             existing = _pick_copy(session, [x for x in rows if x.id not in kept], topic_id)
             moved = existing is not None and existing.topic_id != topic_id
@@ -373,7 +393,7 @@ def sync_course(
                         topic_id=topic_id, source=source, source_id=r.source_id,
                         type=r.type, title=r.title, raw_url=r.raw_url,
                         extracted_text=r.text, content_hash=digest,
-                        mime_type=r.mime_type, **_fresh_state(r),
+                        mime_type=r.mime_type, **_fresh_state(r, cap_note),
                     )
                 )
                 session.commit()
@@ -407,7 +427,7 @@ def sync_course(
                     setattr(existing, k, v)
                 existing.content_hash = digest
                 existing.extracted_text = r.text
-                for k, v in _fresh_state(r).items():
+                for k, v in _fresh_state(r, cap_note).items():
                     setattr(existing, k, v)
                 existing.attempts = 0  # new content: no backoff carried over
                 existing.retry_after = None
@@ -426,6 +446,8 @@ def sync_course(
                 # converted to text): refresh the text, keep derived data.
                 lock_resource(session, existing.id)  # wait out a chunking commit
                 existing.extracted_text = r.text
+                if existing.error is None or is_cap_note(existing.error):
+                    existing.error = cap_note
                 session.add(existing)
                 _relocate_chunks(session, existing.id, r.text)
                 session.commit()

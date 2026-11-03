@@ -1023,3 +1023,41 @@ def test_uncapped_stored_page_is_capped_once(session, user_id, small_cap):
 
     stats = sync_course(session, adapter, "c1", user_id)
     assert stats.resources_updated == 0
+
+
+def test_renamed_uncapped_page_is_capped_in_the_same_sync(session, user_id, small_cap):
+    from app.extract import is_cap_note
+
+    adapter = FakeAdapter()
+    _long_page(adapter, "w" * 50)
+    sync_course(session, adapter, "c1", user_id)
+    page = _resource(session, "r-page")
+    page.extracted_text, page.error = "w" * 50, None  # stored before the cap
+    session.add(page)
+    session.commit()
+    adapter.resources[("c1", "t1")][1].title = "Overview (week 1)"
+
+    stats = sync_course(session, adapter, "c1", user_id)
+    assert stats.resources_updated == 1
+    session.expire_all()
+    page = _resource(session, "r-page")
+    assert page.title == "Overview (week 1)"
+    assert page.extracted_text == "w" * 20 and is_cap_note(page.error)
+
+
+def test_text_refresh_keeps_a_real_failure(session, user_id, small_cap):
+    from app.chunk import FAILED_JOIN, text_cap_note
+
+    adapter = FakeAdapter()
+    _long_page(adapter, "v" * 50)
+    sync_course(session, adapter, "c1", user_id)
+    page = _resource(session, "r-page")
+    page.extracted_text, page.error, page.status = "v" * 50, "LLMError: boom", "failed"
+    session.add(page)
+    session.commit()
+
+    sync_course(session, adapter, "c1", user_id)
+    session.expire_all()
+    page = _resource(session, "r-page")
+    assert page.error.endswith(FAILED_JOIN + "LLMError: boom")
+    assert "20 of 50" in text_cap_note(page.error)

@@ -146,6 +146,25 @@ def text_cap_note(error: str | None) -> str | None:
     return None if note.endswith(SECTIONS_CAPPED) else note
 
 
+def with_text_cap_note(error: str | None, note: str | None) -> str | None:
+    """error with its extraction cap note replaced by note (None: removed),
+    keeping any section cap note or chunking failure after it. For a text
+    refresh that keeps the chunks: what was said about them still holds."""
+    old = text_cap_note(error)
+    rest = error[len(old):] if old else (error or "")
+    if old is None and is_cap_note(error):  # section cap note alone
+        rest = SECTIONS_JOIN + rest[len(CAPPED_PREFIX):]
+    elif old is None and rest:  # a failure alone
+        rest = FAILED_JOIN + rest
+    if note:
+        return note + rest
+    if rest.startswith(SECTIONS_JOIN):
+        return CAPPED_PREFIX + rest[len(SECTIONS_JOIN):]
+    if rest.startswith(FAILED_JOIN):
+        return rest[len(FAILED_JOIN):]
+    return rest or None
+
+
 def needs_llm(resource) -> bool:
     return len(resource.extracted_text or "") >= MIN_LLM_CHARS
 
@@ -204,6 +223,6 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
     resource.error = note if items else "no text to chunk"
     session.add(resource)
     # old chunks out, new ones in: one transaction, kept only if still current
-    if not commit_if_current(session, resource.id, seen_hash):
+    if not commit_if_current(session, resource.id, seen_hash, seen_text=text):
         raise ContentChanged(resource.id)
     return len(items)

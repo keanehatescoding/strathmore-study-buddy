@@ -20,10 +20,10 @@ from typing import Any, Protocol
 
 from sqlmodel import Session, delete, func, select, update
 
+from app.chunk import with_text_cap_note
 from app.extract import (
     MAX_DOWNLOAD_BYTES,
     cap_text,
-    is_cap_note,
     too_large_message,
     youtube_video_id,
 )
@@ -233,7 +233,8 @@ def _relocate_chunks(session: Session, resource_id, text: str) -> None:
         session.add(c)
 
 
-def commit_if_current(session: Session, resource_id, seen_hash) -> bool:
+def commit_if_current(session: Session, resource_id, seen_hash,
+                      seen_text: str | None = None) -> bool:
     """Commit the pending work on a resource only if its content_hash is still
     the one it was built from; otherwise roll it back and return False.
 
@@ -241,13 +242,20 @@ def commit_if_current(session: Session, resource_id, seen_hash) -> bool:
     sync may replace its content: without this it would write the old text
     or chunks over the reset and mark the new content done. A resource
     retired meanwhile is gone: also False, and nothing is written.
+
+    seen_text, when given, must also still be the stored extracted_text: a
+    sync's text refresh (same hash, better or capped text) moves the chunks
+    it knows of, but not ones still being built from the text it replaced.
     """
+    columns = [Resource.id, Resource.content_hash]
+    if seen_text is not None:
+        columns.append(Resource.extracted_text)
     with session.no_autoflush:  # flushing an UPDATE to a deleted row would raise
         row = session.exec(
-            select(Resource.id, Resource.content_hash)
-            .where(Resource.id == resource_id).with_for_update()
+            select(*columns).where(Resource.id == resource_id).with_for_update()
         ).first()
-    if row is None or row[1] != seen_hash:
+    if (row is None or row[1] != seen_hash
+            or (seen_text is not None and (row[2] or "") != seen_text)):
         session.rollback()
         return False
     session.commit()
@@ -434,26 +442,25 @@ def sync_course(
                 session.add(existing)
                 session.commit()
                 stats.resources_updated += 1
-            elif meta_changed or moved:
+            else:
+                # Same source content, but maybe better text from it (e.g. page
+                # HTML now converted to text, or now capped): refresh the text,
+                # keep derived data.
+                better_text = (r.text is not None and existing.extracted_text is not None
+                               and existing.extracted_text != r.text)
+                if not (meta_changed or moved or better_text):
+                    stats.resources_skipped += 1
+                    continue
+                if better_text:
+                    lock_resource(session, existing.id)  # wait out a chunking commit
+                    existing.extracted_text = r.text
+                    existing.error = with_text_cap_note(existing.error, cap_note)
+                    _relocate_chunks(session, existing.id, r.text)
                 for k, v in meta.items():
                     setattr(existing, k, v)
                 session.add(existing)
                 session.commit()
                 stats.resources_updated += 1
-            elif (r.text is not None and existing.extracted_text is not None
-                  and existing.extracted_text != r.text):
-                # Same source content, better text from it (e.g. page HTML now
-                # converted to text): refresh the text, keep derived data.
-                lock_resource(session, existing.id)  # wait out a chunking commit
-                existing.extracted_text = r.text
-                if existing.error is None or is_cap_note(existing.error):
-                    existing.error = cap_note
-                session.add(existing)
-                _relocate_chunks(session, existing.id, r.text)
-                session.commit()
-                stats.resources_updated += 1
-            else:
-                stats.resources_skipped += 1
 
     # Copies of a resource the source still lists, left under other topics by
     # syncs before resources could move: retire them so each shows up once.

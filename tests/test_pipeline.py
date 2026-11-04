@@ -1387,7 +1387,7 @@ def test_interrupted_quiz_run_still_queues_new_material(session, exc):
 
 
 def test_quiz_run_queues_new_material_after_an_unexpected_error(session, monkeypatch):
-    from app.pipeline import run_quiz
+    from app.pipeline import quiz_chunk_ids, run_quiz
 
     _owned_quiz_chunks(session)
     real, calls = __import__("app.notify", fromlist=["x"]).course_of_chunk, []
@@ -1403,6 +1403,9 @@ def test_quiz_run_queues_new_material_after_an_unexpected_error(session, monkeyp
         run_quiz(session, FlakyQuizLLM(fail=0))
     [event] = _new_material(session)
     assert event.payload["new_items"] == 1
+    # The lookup runs before generation, so the failed chunk got no items
+    # and the next run picks it up (and notices it) instead of skipping it.
+    assert quiz_chunk_ids(session, attempt=1) == [calls[1]]
 
 
 def test_failed_enqueue_does_not_mask_the_shutdown(session, monkeypatch):

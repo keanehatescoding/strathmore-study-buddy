@@ -455,6 +455,10 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
             if chunk is None:
                 counts["changed"] += 1  # dropped by a resync since it was listed
                 continue
+            # Before generating: items are committed as they're made, and a
+            # chunk with items is never listed again, so a lookup failing
+            # after that would lose its notice for good.
+            course = course_of_chunk(session, chunk)
             called = False
             try:
                 items = copy_quiz(session, chunk, attempt)
@@ -480,6 +484,8 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
                 if pace and called:
                     time.sleep(pace)  # a failed call is still a request to pace
                 continue
+            if items and course is not None:
+                per_course[str(course.id)] += len(items)
             if session.get(QuizFailure, (chunk_id, attempt)) is not None:
                 session.exec(delete(QuizFailure).where(
                     QuizFailure.chunk_id == chunk_id, QuizFailure.attempt == attempt))
@@ -488,10 +494,6 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
             counts["chunks"] += 1
             print(f"  +{len(items)} items ({counts['chunks']}/{len(ids)} chunks)",
                   flush=True)
-            if items:
-                course = course_of_chunk(session, chunk)
-                if course is not None:
-                    per_course[str(course.id)] += len(items)
             if pace and not shared:
                 session.commit()  # don't sit idle in a transaction while paced
                 time.sleep(pace)

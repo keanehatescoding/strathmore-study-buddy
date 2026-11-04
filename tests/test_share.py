@@ -340,9 +340,9 @@ def test_a_shared_copy_of_an_uncapped_donor_is_capped(session):
 def test_chunk_copy_dropped_when_sync_refreshes_the_text_meanwhile(session, monkeypatch):
     """A same-hash text refresh (e.g. the page now capped, #133) committed
     after the donor was picked: its chunks are of the old text, so none stay."""
-    import app.sync
     from sqlmodel import update
 
+    import app.sync
     from app.share import copy_chunks
     from app.sync import ContentChanged
 

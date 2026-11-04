@@ -110,6 +110,14 @@ def _succeeded(r: Resource) -> None:
     r.retry_after = None
 
 
+def _safe_rollback(session: Session) -> None:
+    """Roll back while another exception is in flight, without replacing it."""
+    try:
+        session.rollback()
+    except Exception as e:  # not BaseException: a Shutdown still gets through
+        print(f"  rollback failed: {str(e)[:120]}", flush=True)
+
+
 def _due():
     return or_(Resource.retry_after.is_(None), Resource.retry_after <= _now())
 
@@ -493,7 +501,7 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
         # made even when a Shutdown (SIGTERM on redeploy) or an unexpected
         # error cuts the run short: the next run finds those chunks done.
         if not finished:
-            session.rollback()  # whatever the interruption left in flight
+            _safe_rollback(session)  # whatever the interruption left in flight
         try:
             for cid, n in per_course.items():
                 if enqueue_new_material(session, UUID(cid), n) is not None:
@@ -501,7 +509,7 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
         except Exception as e:
             if finished:
                 raise
-            session.rollback()  # don't mask the error that stopped the run
+            _safe_rollback(session)  # don't mask the error that stopped the run
             print(f"  could not queue new-material notices: {str(e)[:120]}",
                   flush=True)
     return result

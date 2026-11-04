@@ -1419,6 +1419,21 @@ def test_failed_enqueue_does_not_mask_the_shutdown(session, monkeypatch):
         run_quiz(session, InterruptedQuizLLM(Shutdown("SIGTERM")))
 
 
+def test_failed_rollback_does_not_mask_the_shutdown(session, monkeypatch):
+    from app.jobs import Shutdown
+    from app.pipeline import run_quiz
+
+    _owned_quiz_chunks(session)
+
+    def boom(*a, **kw):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr("app.notify.enqueue_new_material", boom)
+    monkeypatch.setattr(session, "rollback", boom)
+    with pytest.raises(Shutdown):
+        run_quiz(session, InterruptedQuizLLM(Shutdown("SIGTERM")))
+
+
 def test_completed_quiz_run_queues_new_material_once(session):
     from app.pipeline import run_quiz
 

@@ -55,7 +55,8 @@ def strip_nul(text: str) -> str:
 def cap_text(text: str) -> tuple[str, str | None]:
     """Strip NULs, then truncate text over MAX_EXTRACTED_CHARS, on a line break
     when one is close to the cap; returns (text, note), the note None when
-    untouched by the cap. Every extractor's output passes through here."""
+    untouched by the cap. Every extractor's output passes through here, and
+    so does page text stored at sync (sync._capped)."""
     text = strip_nul(text)
     if len(text) <= MAX_EXTRACTED_CHARS:
         return text, None

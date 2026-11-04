@@ -14,13 +14,19 @@ source stops listing are deleted (never off an empty or partial list).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from sqlmodel import Session, delete, func, select, update
 
-from app.extract import MAX_DOWNLOAD_BYTES, too_large_message, youtube_video_id
+from app.chunk import with_text_cap_note
+from app.extract import (
+    MAX_DOWNLOAD_BYTES,
+    cap_text,
+    too_large_message,
+    youtube_video_id,
+)
 from app.models import (
     Assignment,
     Chunk,
@@ -227,7 +233,8 @@ def _relocate_chunks(session: Session, resource_id, text: str) -> None:
         session.add(c)
 
 
-def commit_if_current(session: Session, resource_id, seen_hash) -> bool:
+def commit_if_current(session: Session, resource_id, seen_hash,
+                      seen_text: str | None = None) -> bool:
     """Commit the pending work on a resource only if its content_hash is still
     the one it was built from; otherwise roll it back and return False.
 
@@ -235,13 +242,20 @@ def commit_if_current(session: Session, resource_id, seen_hash) -> bool:
     sync may replace its content: without this it would write the old text
     or chunks over the reset and mark the new content done. A resource
     retired meanwhile is gone: also False, and nothing is written.
+
+    seen_text, when given, must also still be the stored extracted_text: a
+    sync's text refresh (same hash, better or capped text) moves the chunks
+    it knows of, but not ones still being built from the text it replaced.
     """
+    columns = [Resource.id, Resource.content_hash]
+    if seen_text is not None:
+        columns.append(Resource.extracted_text)
     with session.no_autoflush:  # flushing an UPDATE to a deleted row would raise
         row = session.exec(
-            select(Resource.id, Resource.content_hash)
-            .where(Resource.id == resource_id).with_for_update()
+            select(*columns).where(Resource.id == resource_id).with_for_update()
         ).first()
-    if row is None or row[1] != seen_hash:
+    if (row is None or row[1] != seen_hash
+            or (seen_text is not None and (row[2] or "") != seen_text)):
         session.rollback()
         return False
     session.commit()
@@ -288,12 +302,25 @@ def _legacy_hash_matches(adapter, data: ResourceData, legacy: str) -> bool | Non
     return hashlib.sha256(blob).hexdigest() == legacy
 
 
-def _fresh_state(r: ResourceData) -> dict[str, Any]:
+def _fresh_state(r: ResourceData, cap_note: str | None = None) -> dict[str, Any]:
     """Status/error for new or changed content. A file the source says is
-    over the download cap is skipped here, so extraction never fetches it."""
+    over the download cap is skipped here, so extraction never fetches it.
+    Text stored at sync is already extracted: its cap note, if any, is kept
+    in error like run_extraction keeps it."""
     if r.size is not None and r.size > MAX_DOWNLOAD_BYTES:
         return {"status": "skipped", "error": too_large_message()}
-    return {"status": "extracted" if r.text else "pending", "error": None}
+    if r.text:
+        return {"status": "extracted", "error": cap_note}
+    return {"status": "pending", "error": None}
+
+
+def _capped(r: ResourceData) -> tuple[ResourceData, str | None]:
+    """Page text skips run_extraction, so cap it here (after content_hash has
+    seen the full text, keeping stored hashes stable)."""
+    if r.text is None:
+        return r, None
+    text, note = cap_text(r.text)
+    return replace(r, text=text), note
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -351,6 +378,7 @@ def sync_course(
     for topic_source_id, topic_id in topic_id_by_source.items():
         for r in adapter.fetch_resources(course_source_id, topic_source_id):
             digest = content_hash(r)
+            r, cap_note = _capped(r)
             rows = by_source_id.get(r.source_id, [])
             existing = _pick_copy(session, [x for x in rows if x.id not in kept], topic_id)
             moved = existing is not None and existing.topic_id != topic_id
@@ -373,7 +401,7 @@ def sync_course(
                         topic_id=topic_id, source=source, source_id=r.source_id,
                         type=r.type, title=r.title, raw_url=r.raw_url,
                         extracted_text=r.text, content_hash=digest,
-                        mime_type=r.mime_type, **_fresh_state(r),
+                        mime_type=r.mime_type, **_fresh_state(r, cap_note),
                     )
                 )
                 session.commit()
@@ -407,31 +435,32 @@ def sync_course(
                     setattr(existing, k, v)
                 existing.content_hash = digest
                 existing.extracted_text = r.text
-                for k, v in _fresh_state(r).items():
+                for k, v in _fresh_state(r, cap_note).items():
                     setattr(existing, k, v)
                 existing.attempts = 0  # new content: no backoff carried over
                 existing.retry_after = None
                 session.add(existing)
                 session.commit()
                 stats.resources_updated += 1
-            elif meta_changed or moved:
+            else:
+                # Same source content, but maybe better text from it (e.g. page
+                # HTML now converted to text, or now capped): refresh the text,
+                # keep derived data.
+                better_text = (r.text is not None and existing.extracted_text is not None
+                               and existing.extracted_text != r.text)
+                if not (meta_changed or moved or better_text):
+                    stats.resources_skipped += 1
+                    continue
+                if better_text:
+                    lock_resource(session, existing.id)  # wait out a chunking commit
+                    existing.extracted_text = r.text
+                    existing.error = with_text_cap_note(existing.error, cap_note)
+                    _relocate_chunks(session, existing.id, r.text)
                 for k, v in meta.items():
                     setattr(existing, k, v)
                 session.add(existing)
                 session.commit()
                 stats.resources_updated += 1
-            elif (r.text is not None and existing.extracted_text is not None
-                  and existing.extracted_text != r.text):
-                # Same source content, better text from it (e.g. page HTML now
-                # converted to text): refresh the text, keep derived data.
-                lock_resource(session, existing.id)  # wait out a chunking commit
-                existing.extracted_text = r.text
-                session.add(existing)
-                _relocate_chunks(session, existing.id, r.text)
-                session.commit()
-                stats.resources_updated += 1
-            else:
-                stats.resources_skipped += 1
 
     # Copies of a resource the source still lists, left under other topics by
     # syncs before resources could move: retire them so each shows up once.

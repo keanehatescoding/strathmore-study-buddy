@@ -74,14 +74,18 @@ def _donor_exists(session: Session, r: Resource) -> bool:
 def copy_chunks(session: Session, r: Resource) -> int:
     """Copy a chunked donor's chunks onto r, replacing what r has; returns the
     number copied (0 = no donor, nothing touched). Commits; raises
-    ContentChanged (nothing kept) if a sync replaced r's content meanwhile."""
+    ContentChanged (nothing kept) if a sync replaced r's content, or
+    refreshed its text, meanwhile."""
     from app.sync import ContentChanged, _purge_derived, commit_if_current
 
     if r.content_hash is None or not (r.extracted_text or "").strip():
         return 0
+    # what the donor is matched on: a sync's same-hash text refresh committed
+    # before ours must drop the copy, like a content change does
+    seen_hash, seen_text = r.content_hash, r.extracted_text
     has_chunks = select(Chunk.id).where(Chunk.resource_id == Resource.id).exists()
     donor = session.exec(_same_material(r).where(
-        Resource.status == "extracted", Resource.extracted_text == r.extracted_text,
+        Resource.status == "extracted", Resource.extracted_text == seen_text,
         has_chunks,
     ).limit(1)).first()
     if donor is None:
@@ -93,12 +97,11 @@ def copy_chunks(session: Session, r: Resource) -> int:
     for c in chunks:
         session.add(Chunk(resource_id=r.id, title=c.title, content=c.content,
                           order=c.order, start_char=c.start_char, end_char=c.end_char))
-    seen_hash = r.content_hash
     r.status = "extracted"
     if not is_cap_note(r.error):
         r.error = None
     session.add(r)
-    if not commit_if_current(session, r.id, seen_hash):
+    if not commit_if_current(session, r.id, seen_hash, seen_text=seen_text):
         raise ContentChanged(r.id)
     return len(chunks)
 

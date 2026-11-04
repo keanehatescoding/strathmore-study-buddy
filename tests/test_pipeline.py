@@ -675,6 +675,50 @@ def test_rechunk_replaced_mid_call_keeps_neither_old_nor_new_chunks(session):
     _assert_reset(session, r.id)
 
 
+class RefreshingLLM(FakeLLM):
+    """A sync's same-hash text refresh (e.g. the page now capped) commits
+    while the chunker is still working on the text it replaced."""
+
+    def __init__(self, session, rid, text):
+        self.session, self.rid, self.text = session, rid, text
+
+    def complete_json(self, system, user, **kw):
+        if self.text is not None:
+            from app.sync import lock_resource
+
+            lock_resource(self.session, self.rid)
+            self.session.exec(update(Resource).where(Resource.id == self.rid)
+                              .values(extracted_text=self.text))
+            self.session.commit()
+            self.text = None
+        return super().complete_json(system, user, **kw)
+
+
+def test_chunks_of_text_refreshed_mid_call_are_dropped(session):
+    r = _resource(session, status="extracted", extracted_text="x" * 500,
+                  content_hash="same")
+    rid = r.id
+    counts = run_chunking(session, RefreshingLLM(session, rid, "y" * 400)).counts
+    assert counts["changed"] == 1 and counts["chunks"] == 0
+    session.expire_all()
+    assert session.exec(select(Chunk)).all() == []
+    assert session.get(Resource, rid).extracted_text == "y" * 400
+
+    counts = run_chunking(session, FakeLLM()).counts  # the new text, next run
+    assert counts["resources"] == 1
+    assert all(c.start_char is None or c.end_char <= 400
+               for c in session.exec(select(Chunk)).all())
+
+
+def test_commit_if_current_without_text_ignores_a_text_refresh(session):
+    r = _resource(session, status="extracted", extracted_text="old", content_hash="h")
+    session.exec(update(Resource).where(Resource.id == r.id).values(extracted_text="new"))
+    session.commit()
+    assert commit_if_current(session, r.id, "h")
+    assert not commit_if_current(session, r.id, "h", seen_text="old")
+    assert commit_if_current(session, r.id, "h", seen_text="new")
+
+
 def test_text_downloaded_before_a_content_change_is_dropped(session):
     r = _resource(session, raw_url="https://m.example/notes.txt", content_hash="old")
     rid = r.id

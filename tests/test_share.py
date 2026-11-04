@@ -335,3 +335,31 @@ def test_a_shared_copy_of_an_uncapped_donor_is_capped(session):
     session.refresh(r)
     assert len(r.extracted_text) <= MAX_EXTRACTED_CHARS
     assert is_cap_note(r.error) and f"{len(big):,}" in r.error
+
+
+def test_chunk_copy_dropped_when_sync_refreshes_the_text_meanwhile(session, monkeypatch):
+    """A same-hash text refresh (e.g. the page now capped, #133) committed
+    after the donor was picked: its chunks are of the old text, so none stay."""
+    from sqlmodel import update
+
+    import app.sync
+    from app.share import copy_chunks
+    from app.sync import ContentChanged
+
+    course_a, a = _copy_of(session, "a@x", status="extracted", extracted_text=TEXT)
+    run_chunking(session, ChunkLLM(), course_a.id)
+    _, b = _copy_of(session, "b@x", status="extracted", extracted_text=TEXT)
+    purge = app.sync._purge_derived
+
+    def refresh_then_purge(s, rid):
+        s.exec(update(Resource).where(Resource.id == b.id)
+               .values(extracted_text=TEXT[:100]))
+        s.commit()
+        return purge(s, rid)
+
+    monkeypatch.setattr(app.sync, "_purge_derived", refresh_then_purge)
+    with pytest.raises(ContentChanged):
+        copy_chunks(session, b)
+    session.expire_all()
+    assert _chunks(session, b) == []
+    assert session.get(Resource, b.id).extracted_text == TEXT[:100]

@@ -1333,3 +1333,96 @@ def test_chunking_shared_save_on_a_retired_resource_is_changed(session, monkeypa
     counts = run_chunking(session, FakeLLM()).counts
     assert counts["changed"] == 1 and "shared" not in counts
     assert (counts["chunks"], counts["resources"]) == (0, 0)
+
+
+class InterruptedQuizLLM(FlakyQuizLLM):
+    """Answers the first call, then raises `exc` (a SIGTERM's Shutdown)."""
+
+    def __init__(self, exc):
+        super().__init__(fail=0)
+        self.exc = exc
+
+    def complete_json(self, system, user, **kw):
+        if self.calls >= 1:
+            raise self.exc
+        return super().complete_json(system, user, **kw)
+
+
+def _owned_quiz_chunks(session, n=2):
+    from app.models import User
+
+    user = User(email="owner@x.edu")
+    session.add(user)
+    session.commit()
+    for i in range(n):
+        r = _resource(session, source_id=f"o{i}", status="extracted", extracted_text="t")
+        session.add(Chunk(resource_id=r.id, title="c", content=f"t{i}", order=0))
+    course = session.exec(select(Course)).one()
+    course.user_id = user.id
+    session.add(course)
+    session.commit()
+    return course
+
+
+def _new_material(session):
+    from app.models import NotificationEvent
+
+    session.expire_all()
+    return session.exec(select(NotificationEvent).where(
+        NotificationEvent.type == "new_material")).all()
+
+
+@pytest.mark.parametrize("exc", ["shutdown", "keyboard"])
+def test_interrupted_quiz_run_still_queues_new_material(session, exc):
+    from app.jobs import Shutdown
+    from app.pipeline import run_quiz
+
+    course = _owned_quiz_chunks(session)
+    err = Shutdown("SIGTERM") if exc == "shutdown" else KeyboardInterrupt()
+    with pytest.raises(type(err)):
+        run_quiz(session, InterruptedQuizLLM(err))
+    [event] = _new_material(session)
+    assert event.payload["course_id"] == str(course.id)
+    assert event.payload["new_items"] == 1
+
+
+def test_quiz_run_queues_new_material_after_an_unexpected_error(session, monkeypatch):
+    from app.pipeline import run_quiz
+
+    _owned_quiz_chunks(session)
+    real, calls = __import__("app.notify", fromlist=["x"]).course_of_chunk, []
+
+    def course_of_chunk(s, chunk):  # a DB error outside the per-chunk try
+        calls.append(chunk.id)
+        if len(calls) == 2:
+            raise RuntimeError("connection lost")
+        return real(s, chunk)
+
+    monkeypatch.setattr("app.notify.course_of_chunk", course_of_chunk)
+    with pytest.raises(RuntimeError, match="connection lost"):
+        run_quiz(session, FlakyQuizLLM(fail=0))
+    [event] = _new_material(session)
+    assert event.payload["new_items"] == 1
+
+
+def test_failed_enqueue_does_not_mask_the_shutdown(session, monkeypatch):
+    from app.jobs import Shutdown
+    from app.pipeline import run_quiz
+
+    _owned_quiz_chunks(session)
+
+    def boom(*a, **kw):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr("app.notify.enqueue_new_material", boom)
+    with pytest.raises(Shutdown):
+        run_quiz(session, InterruptedQuizLLM(Shutdown("SIGTERM")))
+
+
+def test_completed_quiz_run_queues_new_material_once(session):
+    from app.pipeline import run_quiz
+
+    _owned_quiz_chunks(session)
+    assert run_quiz(session, FlakyQuizLLM(fail=0)).counts["events"] == 1
+    [event] = _new_material(session)
+    assert event.payload["new_items"] == 2

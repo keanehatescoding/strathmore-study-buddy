@@ -1437,6 +1437,79 @@ def test_failed_rollback_does_not_mask_the_shutdown(session, monkeypatch):
         run_quiz(session, InterruptedQuizLLM(Shutdown("SIGTERM")))
 
 
+def _two_owned_courses(session):
+    """Courses A and B, one chunk each, with resource ids fixed so A's chunk is
+    quizzed (and noticed) first, plus a trailing unquizzed chunk in B."""
+    from uuid import UUID
+
+    from app.models import User
+
+    user = User(email="owner@x.edu")
+    session.add(user)
+    session.commit()
+    courses = []
+    for code, rids in (("A", [1]), ("B", [2, 0xFFFF])):
+        course = Course(source="moodle", source_id=f"c{code}", name=code, user_id=user.id)
+        session.add(course)
+        session.commit()
+        topic = Topic(course_id=course.id, source_id=f"t{code}", title="T")
+        session.add(topic)
+        session.commit()
+        for rid in rids:
+            r = Resource(id=UUID(int=rid), topic_id=topic.id, source="moodle",
+                         source_id=f"r{rid}", type="file", title="R",
+                         status="extracted", extracted_text="t")
+            session.add(r)
+            session.commit()
+            session.add(Chunk(resource_id=r.id, title="c", content=f"t{rid}", order=0))
+            session.commit()
+        courses.append(course.id)
+    return courses
+
+
+class StopAfterLLM(FlakyQuizLLM):
+    """Answers the first `n` calls, then raises a SIGTERM's Shutdown."""
+
+    def __init__(self, n):
+        super().__init__(fail=0)
+        self.n = n
+
+    def complete_json(self, system, user, **kw):
+        from app.jobs import Shutdown
+
+        if self.calls >= self.n:
+            raise Shutdown("SIGTERM")
+        return super().complete_json(system, user, **kw)
+
+
+@pytest.mark.parametrize("how", ["completed", "shutdown"])
+def test_failed_enqueue_for_one_course_still_notices_the_next(session, monkeypatch, how):
+    from app.jobs import Shutdown
+    from app.notify import enqueue_new_material
+    from app.pipeline import run_quiz
+
+    a, b = _two_owned_courses(session)
+    tried = []
+
+    def enqueue(s, course_id, n):
+        tried.append(course_id)
+        if course_id == a:
+            raise RuntimeError("db gone")
+        return enqueue_new_material(s, course_id, n)
+
+    monkeypatch.setattr("app.notify.enqueue_new_material", enqueue)
+    if how == "completed":  # the run reports the failure once every course is tried
+        with pytest.raises(RuntimeError, match="db gone"):
+            run_quiz(session, FlakyQuizLLM(fail=0))
+    else:  # the Shutdown still wins over the failed enqueue
+        with pytest.raises(Shutdown):
+            run_quiz(session, StopAfterLLM(2))
+    assert tried[0] == a  # A's failure came first, so B's notice ran after it
+    [event] = _new_material(session)
+    assert event.payload["course_id"] == str(b)
+    assert event.payload["new_items"] == (2 if how == "completed" else 1)
+
+
 def test_completed_quiz_run_queues_new_material_once(session):
     from app.pipeline import run_quiz
 

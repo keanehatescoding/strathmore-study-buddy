@@ -507,16 +507,20 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
         # error cuts the run short: the next run finds those chunks done.
         if not finished:
             _safe_rollback(session)  # whatever the interruption left in flight
-        try:
-            for cid, n in per_course.items():
+        first_error = None
+        for cid, n in per_course.items():
+            try:
                 if enqueue_new_material(session, UUID(cid), n) is not None:
                     counts["events"] += 1
-        except Exception as e:
-            if finished:
-                raise
-            _safe_rollback(session)  # don't mask the error that stopped the run
-            print(f"  could not queue new-material notices: {str(e)[:120]}",
-                  flush=True)
+            except Exception as e:
+                _safe_rollback(session)  # one course's failure must not skip the rest
+                if finished and first_error is None:
+                    first_error = e
+                else:
+                    print(f"  could not queue new-material notice for course {cid}: "
+                          f"{str(e)[:120]}", flush=True)
+        if first_error is not None:
+            raise first_error
     return result
 
 

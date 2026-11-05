@@ -3,6 +3,7 @@
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlmodel import select
@@ -68,6 +69,22 @@ def test_review_flow(testapp):
 
     r = client.get("/stats")
     assert r.status_code == 200 and "100.0%" in r.text and "1 day" in r.text
+
+
+def test_question_page_forms_submit_once(testapp):
+    # app.js locks [data-submit-once] forms on submit and unlocks them on
+    # pageshow, so Back (bfcache) doesn't leave Submit/Skip/Suspend disabled
+    client, Session = testapp["client"], testapp["Session"]
+    _seed(Session)
+    html = client.get("/review/take").text
+    forms = re.findall(r"<form\b[^>]*>", html)
+    posts = [f for f in forms if 'method="post"' in f and "/logout" not in f]
+    actions = {re.search(r'action="/review/[^/]+/(\w+)', f).group(1) for f in posts}
+    assert actions == {"answer", "skip", "suspend"}
+    assert all("data-submit-once" in f for f in posts)
+
+    js = (Path(__file__).parent.parent / "static" / "js" / "app.js").read_text()
+    assert "form[data-submit-once]" in js and "'pageshow'" in js
 
 
 def test_review_wrong_answer(testapp):

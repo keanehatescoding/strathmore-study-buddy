@@ -66,13 +66,21 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Submit once: a double click would post the answer twice
-  document.querySelectorAll('form.answer-form').forEach(form => {
+  // Submit once: a double click would post twice. Every guarded form on the
+  // page leaves it, so one submission locks them all (Skip sits inside the
+  // answer form but belongs to #skip-form via its form= attribute).
+  const onceForms = document.querySelectorAll('form[data-submit-once]');
+  const onceButtons = () => Array.from(onceForms).flatMap(form =>
+    Array.from(form.elements).filter(el => el.type === 'submit'));
+  onceForms.forEach(form => {
     form.addEventListener('submit', () => {
-      form.querySelectorAll('button[type="submit"]').forEach(btn => {
-        btn.disabled = true;
-      });
+      onceButtons().forEach(btn => { btn.disabled = true; });
     });
+  });
+  // Back/forward cache (and Firefox's form-state restore) bring the page back
+  // with the buttons still disabled, as does returning after a failed POST.
+  window.addEventListener('pageshow', () => {
+    onceButtons().forEach(btn => { btn.disabled = false; });
   });
 
   // 3. Quiz Result page shortcut (Enter or Space to advance)

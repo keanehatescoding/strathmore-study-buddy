@@ -110,6 +110,14 @@ def _succeeded(r: Resource) -> None:
     r.retry_after = None
 
 
+def _safe_rollback(session: Session) -> None:
+    """Roll back while another exception is in flight, without replacing it."""
+    try:
+        session.rollback()
+    except Exception as e:  # not BaseException: a Shutdown still gets through
+        print(f"  rollback failed: {str(e)[:120]}", flush=True)
+
+
 def _due():
     return or_(Resource.retry_after.is_(None), Resource.retry_after <= _now())
 
@@ -438,56 +446,81 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
         select(func.count(Chunk.id)).join(Resource, Resource.id == Chunk.resource_id),
         course_id, source,
     )).one() - len(ids)
-    for chunk_id in ids:
-        if _past(deadline, result):
-            break
-        chunk = session.get(Chunk, chunk_id)
-        if chunk is None:
-            counts["changed"] += 1  # dropped by a resync since it was listed
-            continue
-        called = False
-        try:
-            items = copy_quiz(session, chunk, attempt)
-            shared = items is not None
-            if shared:
-                counts["shared"] += 1
-            else:
-                called = True
-                items = generate_for_chunk(session, chunk, llm, attempt)
-        except QuotaExhaustedError as e:
-            print(f"  quota exhausted, stopping run (resumable): {str(e)[:120]}",
-                  flush=True)
-            result.quota_exhausted = True
-            break
-        except Exception as e:
-            session.rollback()
-            tries = _quiz_failed(session, chunk_id, attempt, e)
-            counts["errors" if tries else "changed"] += 1
-            if tries >= MAX_QUIZ_FAILURES:
-                counts["given_up"] += 1
-            print(f"  error on chunk {chunk_id} (try {tries}): {str(e)[:120]}",
-                  flush=True)
-            if pace and called:
-                time.sleep(pace)  # a failed call is still a request to pace
-            continue
-        if session.get(QuizFailure, (chunk_id, attempt)) is not None:
-            session.exec(delete(QuizFailure).where(
-                QuizFailure.chunk_id == chunk_id, QuizFailure.attempt == attempt))
-            session.commit()
-        counts["items"] += len(items)
-        counts["chunks"] += 1
-        print(f"  +{len(items)} items ({counts['chunks']}/{len(ids)} chunks)",
-              flush=True)
-        if items:
+    finished = False
+    try:
+        for chunk_id in ids:
+            if _past(deadline, result):
+                break
+            chunk = session.get(Chunk, chunk_id)
+            if chunk is None:
+                counts["changed"] += 1  # dropped by a resync since it was listed
+                continue
+            # Before generating: items are committed as they're made, and a
+            # chunk with items is never listed again, so a lookup failing
+            # after that would lose its notice for good.
             course = course_of_chunk(session, chunk)
-            if course is not None:
-                per_course[str(course.id)] += len(items)
-        if pace and not shared:
-            session.commit()  # don't sit idle in a transaction while paced
-            time.sleep(pace)
-    for cid, n in per_course.items():
-        if enqueue_new_material(session, UUID(cid), n) is not None:
-            counts["events"] += 1
+            # Keep the id, not the instance: generating commits, which expires
+            # `course`, and reading its id afterwards could need a query that fails.
+            course_key = str(course.id) if course is not None else None
+            called = False
+            try:
+                items = copy_quiz(session, chunk, attempt)
+                shared = items is not None
+                if shared:
+                    counts["shared"] += 1
+                else:
+                    called = True
+                    items = generate_for_chunk(session, chunk, llm, attempt)
+            except QuotaExhaustedError as e:
+                print(f"  quota exhausted, stopping run (resumable): {str(e)[:120]}",
+                      flush=True)
+                result.quota_exhausted = True
+                break
+            except Exception as e:
+                session.rollback()
+                tries = _quiz_failed(session, chunk_id, attempt, e)
+                counts["errors" if tries else "changed"] += 1
+                if tries >= MAX_QUIZ_FAILURES:
+                    counts["given_up"] += 1
+                print(f"  error on chunk {chunk_id} (try {tries}): {str(e)[:120]}",
+                      flush=True)
+                if pace and called:
+                    time.sleep(pace)  # a failed call is still a request to pace
+                continue
+            if items and course_key is not None:
+                per_course[course_key] += len(items)
+            if session.get(QuizFailure, (chunk_id, attempt)) is not None:
+                session.exec(delete(QuizFailure).where(
+                    QuizFailure.chunk_id == chunk_id, QuizFailure.attempt == attempt))
+                session.commit()
+            counts["items"] += len(items)
+            counts["chunks"] += 1
+            print(f"  +{len(items)} items ({counts['chunks']}/{len(ids)} chunks)",
+                  flush=True)
+            if pace and not shared:
+                session.commit()  # don't sit idle in a transaction while paced
+                time.sleep(pace)
+        finished = True
+    finally:
+        # Items are committed chunk by chunk, so tell students about what was
+        # made even when a Shutdown (SIGTERM on redeploy) or an unexpected
+        # error cuts the run short: the next run finds those chunks done.
+        if not finished:
+            _safe_rollback(session)  # whatever the interruption left in flight
+        first_error = None
+        for cid, n in per_course.items():
+            try:
+                if enqueue_new_material(session, UUID(cid), n) is not None:
+                    counts["events"] += 1
+            except Exception as e:
+                _safe_rollback(session)  # one course's failure must not skip the rest
+                if finished and first_error is None:
+                    first_error = e
+                else:
+                    print(f"  could not queue new-material notice for course {cid}: "
+                          f"{str(e)[:120]}", flush=True)
+        if first_error is not None:
+            raise first_error
     return result
 
 

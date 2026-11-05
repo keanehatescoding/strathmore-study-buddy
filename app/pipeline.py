@@ -459,6 +459,9 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
             # chunk with items is never listed again, so a lookup failing
             # after that would lose its notice for good.
             course = course_of_chunk(session, chunk)
+            # Keep the id, not the instance: generating commits, which expires
+            # `course`, and reading its id afterwards could need a query that fails.
+            course_key = str(course.id) if course is not None else None
             called = False
             try:
                 items = copy_quiz(session, chunk, attempt)
@@ -484,8 +487,8 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
                 if pace and called:
                     time.sleep(pace)  # a failed call is still a request to pace
                 continue
-            if items and course is not None:
-                per_course[str(course.id)] += len(items)
+            if items and course_key is not None:
+                per_course[course_key] += len(items)
             if session.get(QuizFailure, (chunk_id, attempt)) is not None:
                 session.exec(delete(QuizFailure).where(
                     QuizFailure.chunk_id == chunk_id, QuizFailure.attempt == attempt))

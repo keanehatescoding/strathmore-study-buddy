@@ -33,6 +33,8 @@ jobs:
           python-version: "3.12"
       # --locked: fails if uv.lock is out of date with pyproject.toml
       - run: uv sync --locked
+      # headless Chromium for the browser tests (they fail, not skip, on CI)
+      - run: uv run playwright install --with-deps --only-shell chromium
       - run: uv run ruff check .
       - name: migrations (upgrade, check, full downgrade, upgrade again)
         run: |

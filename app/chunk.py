@@ -201,7 +201,9 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
         items = []
     elif needs_llm(resource):
         sections = presplit(text)
-        items, left = chunk_sections(sections, llm, deadline=deadline)  # paid work: before any delete
+        items, left = chunk_sections(
+            sections, llm, deadline=deadline
+        )  # paid work: before any delete
         if left:
             capped = f"{len(sections) - left} of {len(sections)} {SECTIONS_CAPPED}"
             # keep both: the text was cut, then only part of what's left chunked

@@ -807,11 +807,11 @@ def test_main_runs_the_stages_its_flags_pick(session, monkeypatch, flag, stages,
     monkeypatch.setattr(pipeline, "llm_clients", lambda: ("chunk", "quiz"))
     monkeypatch.setattr(pipeline, "run_course",
                         lambda s, source, cid, c, q, pace, stages, deadline=None:
-                        ran.append((c, q, stages)))
+                        ran.append((c, q, stages, deadline)) or {})
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", *([flag] if flag else [])])
     pipeline.main()
     llms = ("chunk", "quiz") if needs_llm else (None, None)
-    assert [(c, q, tuple(st)) for c, q, st in ran] == [(*llms, stages)]
+    assert [(c, q, tuple(st), d) for c, q, st, d in ran] == [(*llms, stages, None)]
 
 
 @pytest.mark.parametrize("minutes, expected", [(None, None), (90, 90 * 60)])
@@ -822,7 +822,7 @@ def test_main_turns_max_minutes_into_a_deadline(session, monkeypatch, minutes, e
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "run_course",
                         lambda s, source, cid, c, q, pace, stages, deadline=None:
-                        seen.append(deadline))
+                        seen.append(deadline) or {})
     monkeypatch.setattr(pipeline.time, "monotonic", lambda: 1000.0)
     argv = ["pipeline", "--source", "moodle", "--extract-only"]
     if minutes is not None:
@@ -847,13 +847,13 @@ def test_main_waits_only_behind_a_pipeline_job(session, monkeypatch, capsys, job
     calls, ran = [], []
 
     @contextmanager
-    def single_run(source, bind=None, wait=False):
+    def single_run(source, bind=None, wait=False, deadline=None):
         calls.append(wait)
         yield wait  # the try fails; a blocking wait gets the lock
 
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "single_run", single_run)
-    monkeypatch.setattr(pipeline, "run_course", lambda *a, **kw: ran.append(1))
+    monkeypatch.setattr(pipeline, "run_course", lambda *a, **kw: ran.append(1) or {})
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", "--extract-only"])
     pipeline.main()
     if job_running:

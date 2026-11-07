@@ -655,7 +655,8 @@ def main() -> None:
         chunk_llm, quiz_llm = llm_clients()
 
     for wait in (False, True):
-        with single_run(args.source, wait=wait, deadline=deadline) as got, Session(engine) as session:
+        with single_run(args.source, wait=wait, deadline=deadline) as got, \
+                Session(engine) as session:
             if not got:
                 if deadline is not None and time.monotonic() >= deadline:
                     print("out_of_time: stopped waiting for lock", flush=True)

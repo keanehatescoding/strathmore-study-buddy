@@ -183,8 +183,12 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
 
 - Rate limiting is per-process memory (120 POSTs/min default), keyed by
   signed-in user and by client IP for anonymous requests, with at most
-  10,000 clients tracked (least recently seen evicted). Behind multiple
-  uvicorn workers put a shared limiter or a proxy limit in front.
+  10,000 clients tracked (least recently seen evicted), so on Cloud Run each
+  instance has its own budget and a cold start resets it: it is a coarse
+  abuse guard only. Moodle password attempts (5 per 15 min, per account and
+  per Moodle username) are counted in Postgres (`login_attempts`, hashed
+  keys) instead, so every instance shares that limit and restarts don't
+  reset it.
 - Client IPs come from `X-Forwarded-For`. Proxies **append** to it, so
   only the entries our own proxies added can be trusted; everything to their
   left is whatever the client sent. `TRUSTED_PROXY_HOPS` says how many there
@@ -250,7 +254,9 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   Neither touches `ALLOWED_EMAILS`: signing in again starts an empty account.
 - Moodle password sign-in (`/settings/moodle`) is limited to 5 attempts per
   15 minutes per account and per Moodle username, so it can't be used to
-  guess another student's password. Like the POST limit, it is per-process.
+  guess another student's password. The count is stored in Postgres
+  (`login_attempts`), so every instance shares it (see the rate-limiting
+  note above).
 - Cron observability: set `HEALTHCHECK_PING_URL` (e.g. a healthchecks.io
   check) — the worker pings it after every pass (every minute with
   `--loop 60`) and every 5 minutes while a long pass is still draining a

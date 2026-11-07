@@ -225,9 +225,12 @@ def test_moodle_username_limit_spans_accounts(testapp, monkeypatch):
     app.state.moodle_login_limit = (2, 900)
     try:
         request = Request({"type": "http", "app": app})
-        for n in range(2):
-            assert _moodle_login_wait(request, User(email=f"u{n}@x.edu"), "Victim") is None
-        assert _moodle_login_wait(request, User(email="u9@x.edu"), "victim") is not None
+        with testapp["Session"]() as s:
+            for n in range(2):
+                assert _moodle_login_wait(
+                    request, s, User(email=f"u{n}@x.edu"), "Victim") is None
+            assert _moodle_login_wait(
+                request, s, User(email="u9@x.edu"), "victim") is not None
     finally:
         del app.state.moodle_login_limit
 

@@ -100,6 +100,7 @@ def test_cloudbuild_deploys_only_the_newest_commit():
     ids = [s["id"] for s in steps]
     guard = ids.index("Newest commit?")
     assert "refs/heads/$BRANCH_NAME" in steps[guard]["args"][1]
+    assert "touch /workspace/.skip-deploy" in steps[guard]["args"][1]
     for i, step in enumerate(steps):
         if "gcloud run" in " ".join(step.get("args", [])):
             assert i > guard, step["id"]

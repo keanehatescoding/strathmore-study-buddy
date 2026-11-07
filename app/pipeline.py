@@ -1,8 +1,10 @@
 """Phase 2 pipeline: extract pending resources, then chunk extracted ones.
 
 Usage: python -m app.pipeline --source moodle [--course ID]
-       [--extract-only] [--chunk-only]
-Chunking needs LLM_* in .env; extraction runs without it.
+       [--extract-only] [--chunk-only] [--max-minutes N]
+Chunking needs LLM_* in .env; extraction runs without it. --max-minutes
+stops between items (reporting out_of_time) so a scheduled run ends before
+the platform's task timeout instead of being killed mid-item.
 
 A resource whose download or chunking fails is deferred with exponential
 backoff (Resource.attempts / retry_after, 1h doubling to 24h) rather than
@@ -623,8 +625,13 @@ def main() -> None:
     parser.add_argument("--pace", type=float, default=settings.llm_pace,
                         help="seconds between LLM calls (default LLM_PACE; "
                              "raise it for free-tier rate limits)")
+    parser.add_argument("--max-minutes", type=float, default=None,
+                        help="stop between items after N minutes and report "
+                             "out_of_time (keep it below the job's task timeout)")
     args = parser.parse_args()
 
+    deadline = (time.monotonic() + args.max_minutes * 60
+                if args.max_minutes is not None else None)
     stages = [st for st, skip in zip(STAGES, (
         args.chunk_only or args.quiz_only,
         args.extract_only or args.quiz_only,
@@ -658,7 +665,7 @@ def main() -> None:
                     raise SystemExit(f"course {args.course} not synced — run sync_cli first")
             for course_id in course_ids:
                 run_course(session, args.source, course_id, chunk_llm, quiz_llm,
-                           pace=args.pace, stages=stages)
+                           pace=args.pace, stages=stages, deadline=deadline)
             return
 
 

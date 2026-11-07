@@ -43,7 +43,7 @@ from it with different commands.
    |---|---|---|---|
    | `study-buddy-worker` | `alembic upgrade head && exec python -m app.worker --notify-every 3600` | `*/5 * * * *` | 1 h |
    | `study-buddy-sync` | `alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && exec python -m app.worker` | `0 3 * * *` | 2 h |
-   | `study-buddy-pipeline` | `alembic upgrade head && python -m app.pipeline --source moodle --pace 45 && exec python -m app.pipeline --source classroom --pace 45` | `0 6 * * *` | 12 h |
+   | `study-buddy-pipeline` | `alembic upgrade head && python -m app.pipeline --source moodle --pace 45 --max-minutes 330 && exec python -m app.pipeline --source classroom --pace 45 --max-minutes 330` | `0 6 * * *` | 12 h |
 
    Cloud Run has no always-on worker, so `study-buddy-worker` is a single
    pass every 5 minutes instead of `--loop 60`: a sync queued at sign-in
@@ -59,7 +59,12 @@ from it with different commands.
    runs a notification pass, so the nightly sync's new material goes out
    right away. Events are marked once sent, so the extra pass never emails
    anyone twice. The pipeline gets its own slot after the sync, since paced
-   LLM runs take hours and the free Gemini tier rate-limits hard.
+   LLM runs take hours and the free Gemini tier rate-limits hard. Each source
+   gets a 330-minute budget (`--max-minutes`), so Moodle cannot starve
+   Classroom and both runs stop cleanly between items with `out_of_time` well
+   before the 12 h task timeout; the next day's run resumes. `--pace` overrides
+   `LLM_PACE` for these commands, so setting `LLM_PACE` on the pipeline job
+   itself has no effect (the worker job still needs it for first-run jobs).
 
    Every service and job starts with `alembic upgrade head`: one running new
    code against an old schema fails (e.g. `column ... does not exist`). It

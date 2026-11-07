@@ -806,11 +806,30 @@ def test_main_runs_the_stages_its_flags_pick(session, monkeypatch, flag, stages,
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "llm_clients", lambda: ("chunk", "quiz"))
     monkeypatch.setattr(pipeline, "run_course",
-                        lambda s, source, cid, c, q, pace, stages: ran.append((c, q, stages)))
+                        lambda s, source, cid, c, q, pace, stages, deadline=None:
+                        ran.append((c, q, stages)))
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", *([flag] if flag else [])])
     pipeline.main()
     llms = ("chunk", "quiz") if needs_llm else (None, None)
     assert [(c, q, tuple(st)) for c, q, st in ran] == [(*llms, stages)]
+
+
+@pytest.mark.parametrize("minutes, expected", [(None, None), (90, 90 * 60)])
+def test_main_turns_max_minutes_into_a_deadline(session, monkeypatch, minutes, expected):
+    import app.pipeline as pipeline
+
+    seen = []
+    monkeypatch.setattr(pipeline, "engine", session.get_bind())
+    monkeypatch.setattr(pipeline, "run_course",
+                        lambda s, source, cid, c, q, pace, stages, deadline=None:
+                        seen.append(deadline))
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: 1000.0)
+    argv = ["pipeline", "--source", "moodle", "--extract-only"]
+    if minutes is not None:
+        argv += ["--max-minutes", str(minutes)]
+    monkeypatch.setattr("sys.argv", argv)
+    pipeline.main()
+    assert seen == [None if expected is None else 1000.0 + expected]
 
 
 @pytest.mark.parametrize("job_running", [True, False])

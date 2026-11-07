@@ -18,7 +18,6 @@ from sqlmodel import Session, SQLModel
 from app.db import get_session
 from app.main import app, current_user
 from app.models import User
-from app.security import hit_table
 from tests.dbutil import TEST_DATABASE_URL, make_engine, reset_postgres
 
 
@@ -55,7 +54,6 @@ def testapp():
 
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[current_user] = override_user
-    hit_table(app, "moodle_login_hits").clear()  # app is shared across tests
     yield {"client": TestClient(app), "Session": lambda: Session(engine),
            "user_id": user_id}
     app.dependency_overrides.clear()

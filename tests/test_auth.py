@@ -193,10 +193,10 @@ def test_fetch_email_normalizes(monkeypatch):
 def test_default_secret_key_rejected_in_prod(monkeypatch):
     from pydantic import ValidationError
 
-    from app.config import INSECURE_SECRET_KEY, Settings
+    from app.config import INSECURE_SECRET_KEY, PRODUCTION_ENV_VARS, Settings
 
-    monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
-    monkeypatch.delenv("RAILWAY_ENVIRONMENT_NAME", raising=False)
+    for name in PRODUCTION_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("DEV", raising=False)
     # a plain VPS deploy: nothing says "production", but the key is public
     with pytest.raises(ValidationError, match="DEV=1"):
@@ -207,7 +207,20 @@ def test_default_secret_key_rejected_in_prod(monkeypatch):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, secret_key=INSECURE_SECRET_KEY, dev=True,
                  session_secure_cookie=True)
-    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    Settings(_env_file=None, secret_key="a-real-random-value")
+
+
+@pytest.mark.parametrize("name", ["K_SERVICE", "CLOUD_RUN_JOB", "RAILWAY_ENVIRONMENT"])
+def test_default_secret_key_rejected_on_a_platform_even_with_dev(monkeypatch, name):
+    # Cloud Run sets K_SERVICE (services) and CLOUD_RUN_JOB (jobs) itself, so
+    # a stray DEV=1 there still can't fall back to the public key
+    from pydantic import ValidationError
+
+    from app.config import INSECURE_SECRET_KEY, PRODUCTION_ENV_VARS, Settings
+
+    for other in PRODUCTION_ENV_VARS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(name, "study-buddy-worker")
     with pytest.raises(ValidationError):
         Settings(_env_file=None, secret_key=INSECURE_SECRET_KEY, dev=True)
     Settings(_env_file=None, secret_key="a-real-random-value")

@@ -1,0 +1,76 @@
+# Cloud Build config for the push-to-master trigger (see DEPLOY.md). It is the
+# config Cloud Run's "deploy from repository" setup generated, plus:
+#   - GIT_COMMIT_SHA baked into the image, so /version and the startup logs
+#     of the web service and every job name the commit they run;
+#   - the worker/sync/pipeline jobs moved to the same image, since the
+#     generated config only updated the web service and left the jobs on
+#     whatever image they were created with.
+# The trigger supplies the _AR_* / _SERVICE_NAME / _DEPLOY_REGION /
+# _TRIGGER_ID substitutions; the defaults below match production.
+substitutions:
+  _AR_HOSTNAME: africa-south1-docker.pkg.dev
+  _AR_REPOSITORY: cloud-run-source-deploy
+  _SERVICE_NAME: strathmore-study-buddy-git
+  _DEPLOY_REGION: africa-south1
+  _JOBS: study-buddy-worker study-buddy-sync study-buddy-pipeline
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
+  requestedVerifyOption: VERIFIED
+images:
+  - $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+  - $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest
+steps:
+  - id: Pull
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - docker pull $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest || exit 0
+  - id: Build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --cache-from=$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest
+      - --build-arg=GIT_COMMIT_SHA=$COMMIT_SHA
+      - -t
+      - $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - -t
+      - $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:latest
+      - -f
+      - Dockerfile
+      - .
+  - id: Push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME
+  - id: Deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - $_SERVICE_NAME
+      - --image=$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - --update-labels=managed-by=gcp-cloud-build-deploy-cloud-run,gcb-trigger-id=$_TRIGGER_ID,gcb-trigger-region=$LOCATION,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
+      - --region=$_DEPLOY_REGION
+      - --quiet
+  # After the web service, whose start runs `alembic upgrade head` first; each
+  # job runs it too, so the order is not load-bearing. A job execution already
+  # running keeps its old image; the next scheduled one uses the new image.
+  - id: Update jobs
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        for job in $_JOBS; do
+          gcloud run jobs update "$$job" \
+            --image=$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA \
+            --update-labels=commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID \
+            --region=$_DEPLOY_REGION --quiet
+        done

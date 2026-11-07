@@ -9,7 +9,7 @@ from __future__ import annotations
 def normalize_database_url(url: str) -> str:
     """Pin bare Postgres URLs to the installed psycopg (v3) driver.
 
-    Railway and most hosts hand out `postgres://` or `postgresql://`, which
+    Supabase, Railway and most hosts hand out `postgres://` or `postgresql://`, which
     SQLAlchemy maps to psycopg2 — not installed, so every service would fail
     to start. URLs that already name a driver are left alone.
     """

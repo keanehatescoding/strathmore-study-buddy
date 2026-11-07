@@ -19,13 +19,13 @@ db_url = os.getenv("DATABASE_URL")
 if db_url:
     # Alembic runs sync; convert async URL if ever used.
     db_url = db_url.replace("+asyncpg", "").replace("+async_psycopg", "")
-    db_url = normalize_database_url(db_url)  # Railway's postgres:// -> psycopg
+    db_url = normalize_database_url(db_url)  # a host's postgres:// -> psycopg
     config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = SQLModel.metadata
 
-# Every Railway service runs `alembic upgrade head` on start (web, worker,
-# crons), so two may migrate at once; the loser waits here, then finds the
+# The web service and every job run `alembic upgrade head` on start (see
+# DEPLOY.md), so two may migrate at once; the loser waits here, then finds the
 # schema already at head.
 MIGRATION_LOCK_ID = 0x5B_0A1E  # arbitrary, app-wide
 

@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.dburl import normalize_database_url
 
 INSECURE_SECRET_KEY = "dev-insecure-change-me"
+# Set by the platform itself, never in a local .env: Cloud Run sets K_SERVICE
+# on services and CLOUD_RUN_JOB on jobs; Railway set RAILWAY_ENVIRONMENT*.
+PRODUCTION_ENV_VARS = ("K_SERVICE", "CLOUD_RUN_JOB",
+                       "RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME")
 
 
 class Settings(BaseSettings):
@@ -76,9 +80,9 @@ class Settings(BaseSettings):
     def _require_real_secret(self):
         # SECRET_KEY signs sessions and encrypts stored tokens; the default is
         # public, so only an explicit DEV=1 accepts it, and never on a host
-        # that is clearly production (HTTPS cookies, Railway).
+        # that is clearly production (HTTPS cookies, a hosting platform).
         in_prod = self.session_secure_cookie or any(
-            os.environ.get(k) for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME")
+            os.environ.get(k) for k in PRODUCTION_ENV_VARS
         )
         if self.secret_key in ("", INSECURE_SECRET_KEY) and (in_prod or not self.dev):
             raise ValueError(
@@ -103,7 +107,17 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+# Where the deployed commit comes from, first match wins: GIT_COMMIT_SHA is
+# baked into the image by cloudbuild.yaml (a Docker build arg), so the web
+# service and every Cloud Run job started from that image report it;
+# RAILWAY_GIT_COMMIT_SHA is what Railway set on GitHub-triggered deploys.
+COMMIT_ENV_VARS = ("GIT_COMMIT_SHA", "RAILWAY_GIT_COMMIT_SHA")
+
+
 def running_commit() -> str:
-    """The git commit this process was deployed from. Railway sets it on
-    GitHub-triggered deploys; a `railway up` or local run reports "unknown"."""
-    return os.environ.get("RAILWAY_GIT_COMMIT_SHA", "").strip() or "unknown"
+    """The git commit this process was deployed from, or "unknown" (a local
+    run, or an image built without the GIT_COMMIT_SHA build arg)."""
+    for name in COMMIT_ENV_VARS:
+        if sha := os.environ.get(name, "").strip():
+            return sha
+    return "unknown"

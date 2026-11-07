@@ -1,63 +1,104 @@
 # Deploy
 
-## Railway (recommended)
+## Google Cloud Run + Supabase (production)
 
-1. `railway init`, add the repo. Add a Postgres plugin (sets `DATABASE_URL`).
-2. Set env vars (see `.env.example`): `MOODLE_TOKEN`, `MOODLE_BASE_URL`,
-   `GOOGLE_CLIENT_ID/SECRET` (after classroom consent; enable both the Classroom
-   API and the Drive API in that Google Cloud project, since Classroom materials
-   are Drive files read with `drive.readonly`), `LLM_*`, `RESEND_API_KEY`,
-   `EMAIL_FROM`, `EMAIL_TO`, `APP_BASE_URL` (the public web URL, used in
-   email links and as the Google sign-in redirect). `DATABASE_URL` can stay as the plugin sets it: a
-   bare `postgres://` / `postgresql://` URL is switched to the installed
-   `psycopg` (v3) driver automatically.
-3. Services — five in all, counting Postgres:
+Production runs on Cloud Run in `africa-south1`, against Supabase Postgres.
+One image serves everything: the web service and three Cloud Run jobs start
+from it with different commands.
 
-   | Service | Start command | Schedule |
-   |---|---|---|
-   | `web` | `Procfile` / `Dockerfile` default | always on |
-   | `worker` | `alembic upgrade head && python -m app.worker --loop 60` | always on |
-   | `sync-cron` | step 5 | `0 3 * * *` |
-   | `pipeline-cron` | step 6 | `0 6 * * *` |
+1. **Database (Supabase).** Use the **session** pooler (port 5432) or a
+   direct connection, never the transaction pooler (port 6543): the pipeline
+   takes session-level `pg_advisory_lock`s and psycopg (v3) uses prepared
+   statements, and neither survives transaction pooling. Cloud Run has no
+   IPv6 egress by default, so the IPv6-only direct host may not connect;
+   the session pooler is the safe choice. A bare `postgres://` /
+   `postgresql://` URL is switched to the `psycopg` driver automatically.
+   The app never uses Supabase's Data API: turn it off, and revoke the
+   default privileges Supabase grants `anon` and `authenticated` on
+   `public`, so the tables can only be reached through `DATABASE_URL`.
+2. **Secrets (Secret Manager),** passed to the service and every job with
+   `--set-secrets NAME=NAME:latest`: `DATABASE_URL`, `SECRET_KEY`,
+   `APP_BASE_URL` (the public web URL, used in email links and as the
+   Google sign-in redirect), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+   (enable both the Classroom API and the Drive API in that Google Cloud
+   project, since Classroom materials are Drive files read with
+   `drive.readonly`), `LLM_API_KEY`, `LLM_BASE_URL`, `MOODLE_BASE_URL`,
+   `RESEND_API_KEY`, `SESSION_SECURE_COOKIE` (`true`). Non-secret settings
+   are plain env vars (`--update-env-vars`): `EMAIL_FROM` (a sender on a
+   domain verified in Resend; with it empty nothing is sent, and the events
+   wait in the queue), `LLM_CHUNK_MODEL` / `LLM_QUIZ_MODEL` /
+   `LLM_GRADE_MODEL`, and `LLM_PACE` on the worker job. Every service and
+   job needs the same `SECRET_KEY`. In zsh, write `${name}:latest`:
+   `$name:latest` applies the `:l` modifier. Everything runs as the
+   `study-buddy-web` service account, which needs
+   `roles/secretmanager.secretAccessor` on those secrets.
+3. **Web service** `strathmore-study-buddy-git`: the image's default
+   command (`alembic upgrade head`, then uvicorn on `$PORT`). Cloud Run
+   ignores the image's `HEALTHCHECK`; `/health` is still there for uptime
+   checks.
+4. **Jobs**, each run as `sh -c '<command>'` with no retries
+   (`--max-retries 0`; the next scheduled run is the retry):
 
-   The worker polls the job queue every minute, so a sync queued at sign-in
-   or on connecting Moodle starts within a minute, as does the first pipeline
-   run for each new user (see below). The notification pass over all users
-   stays hourly: the worker queues it only when the last one is an hour old
-   (`--notify-every SECONDS` changes that; the default is 3600 with
-   `--loop`). The worker needs `LLM_*` for that run, including
-   `LLM_PACE` (e.g. `45` on the free Gemini tier, matching `pipeline-cron`'s
-   `--pace`); without `LLM_API_KEY` no such run is queued and new users wait
-   for `pipeline-cron`. Every service starts with `alembic
-   upgrade head`: services deploy independently, and one running new code
-   against an old schema fails (e.g. `column ... does not exist`) until
-   web happens to redeploy. It is a no-op at head, and concurrent runs
-   serialize on a Postgres advisory lock. Point all services at the same
-   repo and branch, so a merge redeploys them together.
-4. Each user connects their own Moodle account at **Settings** in the nav
+   | Job | Command | Schedule (UTC) | Task timeout |
+   |---|---|---|---|
+   | `study-buddy-worker` | `alembic upgrade head && exec python -m app.worker --notify-every 3600` | `*/5 * * * *` | 1 h |
+   | `study-buddy-sync` | `alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && exec python -m app.worker` | `0 3 * * *` | 2 h |
+   | `study-buddy-pipeline` | `alembic upgrade head && python -m app.pipeline --source moodle --pace 45 && exec python -m app.pipeline --source classroom --pace 45` | `0 6 * * *` | 12 h |
+
+   Cloud Run has no always-on worker, so `study-buddy-worker` is a single
+   pass every 5 minutes instead of `--loop 60`: a sync queued at sign-in
+   or by "Sync now", and a new user's first pipeline run (see below), start
+   within 5 minutes. A pass that is still draining when the next one starts
+   is fine, since job claims use `FOR UPDATE SKIP LOCKED`. The
+   notification pass stays hourly: `--notify-every 3600` makes a pass queue
+   one only when the last is an hour old. The worker needs `LLM_*`,
+   including `LLM_PACE` (`45` on the free Gemini tier, matching the
+   pipeline's `--pace`), for that first pipeline run; without
+   `LLM_API_KEY` none is queued and new users wait for the daily pipeline.
+   The sync job's worker pass has no `--notify-every` on purpose: it always
+   runs a notification pass, so the nightly sync's new material goes out
+   right away. Events are marked once sent, so the extra pass never emails
+   anyone twice. The pipeline gets its own slot after the sync, since paced
+   LLM runs take hours and the free Gemini tier rate-limits hard.
+
+   Every service and job starts with `alembic upgrade head`: one running new
+   code against an old schema fails (e.g. `column ... does not exist`). It
+   is a no-op at head, and concurrent runs serialize on a Postgres advisory
+   lock.
+5. **Schedules (Cloud Scheduler).** `africa-south1` has no Cloud Scheduler,
+   so the three schedulers live in `europe-west1` and call each job's
+   `:run` endpoint (`https://run.googleapis.com/v2/projects/PROJECT/locations/africa-south1/jobs/JOB:run`,
+   POST, OAuth token) as the `study-buddy-scheduler` service account, which
+   has `roles/run.invoker` on each job.
+6. **Deploys (Cloud Build).** A trigger in `europe-west1` (Cloud Build
+   triggers aren't offered in `africa-south1`) runs `cloudbuild.yaml` on
+   every push to `master`. It builds the image with the commit baked in
+   (`GIT_COMMIT_SHA`), pushes it to Artifact Registry in `africa-south1`,
+   points the web service at it, then moves all three jobs to the same
+   image. A job execution already running finishes on its old image. Just
+   before deploying, the build checks that `master` still points at its
+   commit; if a newer push has landed, it logs "skipping deploy", still
+   succeeds, and leaves the deploy to the newer build, so two quick pushes
+   can't end with the older one live. The trigger must use the repository's `cloudbuild.yaml` (Configuration →
+   Cloud Build configuration file, location `cloudbuild.yaml`), not the
+   inline config the Cloud Run setup generated: that one updated only the
+   web service and left the jobs on the image they were created with. Its
+   service account (the default compute account) needs `roles/run.admin`
+   and `roles/iam.serviceAccountUser` on `study-buddy-web`. Builds are listed
+   with `gcloud builds list --region europe-west1`.
+7. Each user connects their own Moodle account at **Settings** in the nav
    (`/settings/moodle`: sign in once via `login/token.php`, or paste their
    mobile web service key). Tokens are stored encrypted with a key derived
-   from `SECRET_KEY` — rotating `SECRET_KEY` means everyone reconnects, and
-   the worker and cron services need the same `SECRET_KEY` as web
-   (`scripts/railway-sync-cron-env.sh <service>` references it).
+   from `SECRET_KEY`, so rotating `SECRET_KEY` means everyone reconnects.
    The global `MOODLE_TOKEN` is only used for `MOODLE_TOKEN_OWNER` (with no
    owner it is unused), and likewise `GOOGLE_REFRESH_TOKEN` for
    `GOOGLE_REFRESH_TOKEN_OWNER`. Courses synced before sign-in existed stay
    hidden until the owner signs in, or `python -m app.admin_cli claim-unowned
-   EMAIL` assigns them.
-5. `sync-cron`: a Railway cron service, daily at 03:00 UTC. Syncs go
-   through the job queue — one job per connected user, then the worker
-   drains them and sends notifications:
-   ```
-   alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && python -m app.worker
-   ```
-   This single pass has no `--notify-every` on purpose: it always runs a
-   notification pass, so the nightly sync's new material goes out right
-   away rather than at the persistent worker's next hourly pass. Events are
-   marked once sent, so the extra pass never emails anyone twice.
-   Signing in with Google also queues a Classroom sync for that user, and
+   EMAIL` assigns them (run admin commands as a one-off execution of a job
+   with `--args`, or locally against `DATABASE_URL`).
+8. Signing in with Google also queues a Classroom sync for that user, and
    the Courses page's "Sync now" button queues one per connected source (at
-   most once per 10 minutes per user, counting the cron's syncs too). Users
+   most once per 10 minutes per user, counting the nightly syncs too). Users
    who signed in before Drive access was requested must sign in once more;
    until then their Drive files stay pending. Likewise, Classroom
    announcements need `classroom.announcements.readonly`: users who signed
@@ -68,25 +109,19 @@
    Testing mode that is enough for the listed test users; a published app
    must finish Google's verification for the scope before production use,
    or users see the unverified-app warning.
-6. `pipeline-cron`: a second cron service, daily at 06:00 UTC — a separate
-   slot from the sync, since paced LLM runs take hours and the free Gemini
-   tier rate-limits hard. It extracts, chunks and writes quizzes for what
-   the sync brought in:
-   ```
-   alembic upgrade head && python -m app.pipeline --source moodle --pace 45 && python -m app.pipeline --source classroom --pace 45
-   ```
-   A run that exhausts the LLM quota stops early (`quota_exhausted`) and the
-   next day's run resumes; resources that keep failing back off and are
-   eventually marked failed instead of being re-billed daily.
-   One resource's cost is bounded too: extracted text is truncated to its
-   first 500,000 characters (`MAX_EXTRACTED_CHARS`, about a 250-page book),
-   and the chunker sends at most 100 sections (`MAX_SECTIONS`). A truncated
-   resource is still studied; its page says how much of it was kept.
+9. A pipeline run that exhausts the LLM quota stops early
+   (`quota_exhausted`) and the next day's run resumes; resources that keep
+   failing back off and are eventually marked failed instead of being
+   re-billed daily. One resource's cost is bounded too: extracted text is
+   truncated to its first 500,000 characters (`MAX_EXTRACTED_CHARS`, about
+   a 250-page book), and the chunker sends at most 100 sections
+   (`MAX_SECTIONS`). A truncated resource is still studied; its page says
+   how much of it was kept. All steps are idempotent; re-running is always
+   safe.
 
-   Both crons need the web service's variables (`scripts/railway-sync-cron-env.sh
-   <service>` references them, `LLM_*` included); set `LLM_CHUNK_MODEL` /
-   `LLM_QUIZ_MODEL` on `pipeline-cron` only if they differ from the defaults.
-   All steps are idempotent; re-running is always safe.
+Production ran on Railway until 2026-11 (see `docs/incident-2026-10-23.md`);
+`scripts/railway-sync-cron-env.sh` and the Railway steps in
+`docs/incident-response.md` are from then.
 
 ## Single VPS (podman)
 
@@ -170,17 +205,20 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   upgrade again on Postgres 16, the full suite on Postgres 16 and on SQLite,
   and a Docker image build.
 - The Docker image installs exactly `uv.lock` (no dev tools) and runs as an
-  unprivileged user. Its `HEALTHCHECK` polls `/health` on `$PORT`; Railway
+  unprivileged user. Its `HEALTHCHECK` polls `/health` on `$PORT`; Cloud Run
   ignores it, but under plain docker/podman start worker and cron containers
   from the image with `--no-healthcheck`, since they serve no HTTP.
 - `/health` checks Postgres and returns 503 when unreachable — safe to use
   for platform restart decisions.
-- `/version` returns `{"commit": "<sha>"}` from Railway's
-  `RAILWAY_GIT_COMMIT_SHA`, and the web and worker processes log it at
-  startup ("starting web at commit …"). After a merge, compare it with
+- `/version` returns `{"commit": "<sha>"}`, the commit the image was built
+  from (`GIT_COMMIT_SHA`, a build arg `cloudbuild.yaml` passes; Railway's
+  `RAILWAY_GIT_COMMIT_SHA` is the fallback), and the web and worker
+  processes log it at startup ("starting web at commit …"), so a job's
+  logs show the commit it ran. After a merge, compare it with
   `git ls-remote origin refs/heads/master` (which asks GitHub directly, so a
-  stale local `origin/master` can't mislead) to catch a service whose deploy
-  trigger was lost. A `railway up` deploy carries no commit and reports `"unknown"`.
+  stale local `origin/master` can't mislead) to catch a deploy that didn't
+  happen. An image built without the build arg (a plain `docker build`, or
+  `gcloud run deploy --source`) reports `"unknown"`.
 - Sign-in is limited by `ALLOWED_EMAILS` (default `@strathmore.edu`): a
   comma-separated mix of exact addresses and `@domain` entries. Anyone else
   is sent back to `/login` with an explanation. Set it to your address for

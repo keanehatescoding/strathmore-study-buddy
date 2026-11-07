@@ -7,6 +7,7 @@ see DEPLOY.md.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import secrets
 import time
@@ -74,6 +75,46 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return apply_security_headers(response, nonce)
 
 
+def forwarded_client(headers, hops: int) -> str | None:
+    """The client address from X-Forwarded-For, trusting the last `hops`
+    entries (the ones our own proxies appended), or None to leave the
+    connection's address alone.
+
+    Proxies append, so a client can put anything in the entries to the left
+    of theirs: on Cloud Run, Google's front end appends the address it saw,
+    which makes the rightmost entry the real client and the leftmost (what
+    uvicorn's `--forwarded-allow-ips "*"` uses) whatever the client sent."""
+    if hops <= 0:
+        return None
+    entries = [e.strip() for name, value in headers if name.lower() == b"x-forwarded-for"
+               for e in value.decode("latin-1").split(",")]
+    entries = [e for e in entries if e]
+    if not entries:
+        return None
+    host = entries[-hops] if len(entries) >= hops else entries[0]
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return None
+
+
+class ForwardedForMiddleware:
+    """Set the request's client address from X-Forwarded-For per
+    settings.proxy_hops. Edits the ASGI scope in place, so uvicorn's access
+    log shows the same address the rate limiter keys on."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            host = forwarded_client(scope.get("headers") or [], settings.proxy_hops)
+            if host is not None:
+                port = scope["client"][1] if scope.get("client") else 0
+                scope["client"] = (host, port)
+        await self.app(scope, receive, send)
+
+
 class HitTable:
     """Sliding-window hit log per client key, bounded as an LRU.
 
@@ -120,7 +161,8 @@ def hit_table(app, name: str = "rate_limit_hits") -> HitTable:
 def client_key(request) -> str:
     """Signed-in users are limited per account, so a classroom behind one
     NAT address doesn't share a budget; anonymous POSTs fall back to the IP
-    (uvicorn resolves X-Forwarded-For via --forwarded-allow-ips)."""
+    (resolved from X-Forwarded-For by ForwardedForMiddleware, or by
+    uvicorn's --forwarded-allow-ips when TRUSTED_PROXY_HOPS is 0)."""
     user_id = request.scope.get("session", {}).get("user_id")
     if user_id:
         return f"user:{user_id}"

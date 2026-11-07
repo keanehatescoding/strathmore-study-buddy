@@ -185,17 +185,25 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   signed-in user and by client IP for anonymous requests, with at most
   10,000 clients tracked (least recently seen evicted). Behind multiple
   uvicorn workers put a shared limiter or a proxy limit in front.
-- Client IPs come from `X-Forwarded-For`, trusted from the peers listed in
-  `FORWARDED_ALLOW_IPS` (Dockerfile/Procfile default `*`: any peer). Uvicorn
-  takes the leftmost address that isn't a trusted proxy — with `*` that is
-  the leftmost entry, which a client can forge unless the proxy **replaces**
-  any incoming `X-Forwarded-For` rather than appending to it. So: only let
-  the proxy reach uvicorn (never publish the port directly), make the proxy
-  overwrite the header (nginx: `proxy_set_header X-Forwarded-For
-  $remote_addr;`, not `$proxy_add_x_forwarded_for`), and where the proxy's
-  address is known set `FORWARDED_ALLOW_IPS` to it (IPs or CIDRs,
-  comma-separated). A forged address only affects the anonymous POST budget
-  and logs — signed-in users are rate-limited by account.
+- Client IPs come from `X-Forwarded-For`. Proxies **append** to it, so
+  only the entries our own proxies added can be trusted; everything to their
+  left is whatever the client sent. `TRUSTED_PROXY_HOPS` says how many there
+  are: the client is that many entries from the right.
+  - **Cloud Run** appends the address it saw, so the default there (when
+    `K_SERVICE` is set) is `1`. To check, send a forged header and read the
+    service's access log, e.g. `curl -H 'X-Forwarded-For: 203.0.113.77'
+    <url>/health`: the log line must show your real address, not
+    203.0.113.77. If it shows a Google address instead (a load balancer in
+    front adds its own entry), set `TRUSTED_PROXY_HOPS=2`.
+  - **Elsewhere** it defaults to `0`, which leaves it to uvicorn's
+    `--forwarded-allow-ips` (`FORWARDED_ALLOW_IPS`, Dockerfile/Procfile
+    default `*`: any peer). With `*` uvicorn takes the leftmost entry, which
+    a client can forge unless the proxy **replaces** any incoming header
+    (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`, not
+    `$proxy_add_x_forwarded_for`); or set `TRUSTED_PROXY_HOPS=1` behind one
+    appending proxy. Either way, only let the proxy reach uvicorn.
+  A forged address only affects the anonymous POST budget and logs:
+  signed-in users are rate-limited by account.
 - CSP: scripts and `<style>` elements need the per-response nonce
   (`{{ request.state.csp_nonce }}` in templates); no `unsafe-inline`.
   `style="…"` attributes are blocked — add a class to `static/css/app.css`.

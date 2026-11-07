@@ -183,8 +183,12 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
 
 - Rate limiting is per-process memory (120 POSTs/min default), keyed by
   signed-in user and by client IP for anonymous requests, with at most
-  10,000 clients tracked (least recently seen evicted). Behind multiple
-  uvicorn workers put a shared limiter or a proxy limit in front.
+  10,000 clients tracked (least recently seen evicted), so on Cloud Run each
+  instance has its own budget and a cold start resets it: it is a coarse
+  abuse guard only. Moodle password attempts (5 per 15 min, per account and
+  per Moodle username) are counted in Postgres (`login_attempts`, hashed
+  keys) instead, so every instance shares that limit and restarts don't
+  reset it.
 - Client IPs come from `X-Forwarded-For`, trusted from the peers listed in
   `FORWARDED_ALLOW_IPS` (Dockerfile/Procfile default `*`: any peer). Uvicorn
   takes the leftmost address that isn't a trusted proxy — with `*` that is

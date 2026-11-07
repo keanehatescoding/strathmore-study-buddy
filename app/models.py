@@ -69,6 +69,24 @@ class OutstandingGrant(SQLModel, table=True):
     )
 
 
+class LoginAttempt(SQLModel, table=True):
+    """One counted password attempt (app.throttle). In the database, not in
+    process memory, so every web instance shares the count and a restart or
+    scale-to-zero doesn't reset it. `key` is a hash: no usernames kept."""
+
+    __tablename__ = "login_attempts"
+    __table_args__ = (
+        Index("ix_login_attempts_key_at", "key", "attempted_at"),
+        Index("ix_login_attempts_at", "attempted_at"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    key: str
+    attempted_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
 class Course(SQLModel, table=True):
     __tablename__ = "courses"
     __table_args__ = (

@@ -45,6 +45,11 @@ from it with different commands.
    | `study-buddy-sync` | `alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && exec python -m app.worker` | `0 3 * * *` | 2 h |
    | `study-buddy-pipeline` | `alembic upgrade head && python -m app.pipeline --source moodle --pace 45 --max-minutes 330 && exec python -m app.pipeline --source classroom --pace 45 --max-minutes 330` | `0 6 * * *` | 12 h |
 
+   Note: changing a job's command above does not reach the deployed job via
+   cloudbuild.yaml (it only updates images). Apply it once with
+   `gcloud run jobs update <job> --region=... --command='sh','-c','<command>'`
+   (or recreate the job) before relying on the new flag.
+
    Cloud Run has no always-on worker, so `study-buddy-worker` is a single
    pass every 5 minutes instead of `--loop 60`: a sync queued at sign-in
    or by "Sync now", and a new user's first pipeline run (see below), start

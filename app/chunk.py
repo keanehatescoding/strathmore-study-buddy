@@ -109,13 +109,17 @@ def locate(content: str, full: str) -> tuple[int | None, int | None]:
 
 
 def chunk_sections(sections: list[str], llm: LLMClient,
-                   max_calls: int = MAX_SECTIONS) -> tuple[list[dict], int]:
+                   max_calls: int = MAX_SECTIONS,
+                   deadline: float | None = None) -> tuple[list[dict], int]:
     """Chunk sections in order with at most max_calls LLM calls, halves of a
     truncated section included. Returns (chunks, sections left unstudied)."""
+    import time
     out, calls = [], 0
     todo = [(i, s) for i, s in reversed(list(enumerate(sections)))]  # a stack
     while todo:
         if calls >= max_calls:
+            return out, len({i for i, _ in todo})
+        if deadline is not None and time.monotonic() >= deadline:
             return out, len({i for i, _ in todo})
         i, section = todo.pop()
         calls += 1
@@ -169,7 +173,8 @@ def needs_llm(resource) -> bool:
     return len(resource.extracted_text or "") >= MIN_LLM_CHARS
 
 
-def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> int:
+def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
+                   deadline: float | None = None) -> int:
     """Chunk one extracted resource. Returns number of chunks created.
 
     Returns 0 without touching anything when cached, or when the text is long
@@ -196,7 +201,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None) -> 
         items = []
     elif needs_llm(resource):
         sections = presplit(text)
-        items, left = chunk_sections(sections, llm)  # paid work: before any delete
+        items, left = chunk_sections(sections, llm, deadline=deadline)  # paid work: before any delete
         if left:
             capped = f"{len(sections) - left} of {len(sections)} {SECTIONS_CAPPED}"
             # keep both: the text was cut, then only part of what's left chunked

@@ -4,7 +4,9 @@
 #     of the web service and every job name the commit they run;
 #   - the worker/sync/pipeline jobs moved to the same image, since the
 #     generated config only updated the web service and left the jobs on
-#     whatever image they were created with.
+#     whatever image they were created with;
+#   - a newest-commit check, so overlapping builds never deploy an older
+#     commit over a newer one.
 # The trigger supplies the _AR_* / _SERVICE_NAME / _DEPLOY_REGION /
 # _TRIGGER_ID substitutions; the defaults below match production.
 substitutions:
@@ -46,18 +48,38 @@ steps:
       - push
       - --all-tags
       - $_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME
+  # Newest commit wins. Builds of two quick pushes run concurrently and can
+  # finish in either order, so an older build must not deploy over a newer
+  # one: if the branch has moved past this commit, skip the deploy steps and
+  # leave it to the newer build. Fails closed if GitHub can't be reached;
+  # retry the build. A newer build that fails leaves the previous deploy up.
+  - id: Newest commit?
+    name: gcr.io/cloud-builders/git
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        tip=$(git ls-remote "https://github.com/$REPO_FULL_NAME" "refs/heads/$BRANCH_NAME" | cut -f1)
+        if [ -z "$$tip" ]; then
+          echo "could not read $BRANCH_NAME from $REPO_FULL_NAME" >&2; exit 1
+        fi
+        if [ "$$tip" != "$COMMIT_SHA" ]; then
+          echo "$BRANCH_NAME is at $$tip, not $COMMIT_SHA: skipping deploy"
+          touch /workspace/.skip-deploy
+        fi
   - id: Deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - services
-      - update
-      - $_SERVICE_NAME
-      - --image=$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
-      - --update-labels=managed-by=gcp-cloud-build-deploy-cloud-run,gcb-trigger-id=$_TRIGGER_ID,gcb-trigger-region=$LOCATION,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
-      - --region=$_DEPLOY_REGION
-      - --quiet
+      - -c
+      - |
+        set -eu
+        [ -e /workspace/.skip-deploy ] && exit 0
+        gcloud run services update $_SERVICE_NAME \
+          --image=$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA \
+          --update-labels=managed-by=gcp-cloud-build-deploy-cloud-run,gcb-trigger-id=$_TRIGGER_ID,gcb-trigger-region=$LOCATION,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID \
+          --region=$_DEPLOY_REGION --quiet
   # After the web service, whose start runs `alembic upgrade head` first; each
   # job runs it too, so the order is not load-bearing. A job execution already
   # running keeps its old image; the next scheduled one uses the new image.
@@ -68,6 +90,7 @@ steps:
       - -c
       - |
         set -eu
+        [ -e /workspace/.skip-deploy ] && exit 0
         for job in $_JOBS; do
           gcloud run jobs update "$$job" \
             --image=$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA \

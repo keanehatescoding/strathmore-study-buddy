@@ -75,8 +75,11 @@ from it with different commands.
    every push to `master`. It builds the image with the commit baked in
    (`GIT_COMMIT_SHA`), pushes it to Artifact Registry in `africa-south1`,
    points the web service at it, then moves all three jobs to the same
-   image. A job execution already running finishes on its old image. The
-   trigger must use the repository's `cloudbuild.yaml` (Configuration →
+   image. A job execution already running finishes on its old image. Just
+   before deploying, the build checks that `master` still points at its
+   commit; if a newer push has landed, it logs "skipping deploy", still
+   succeeds, and leaves the deploy to the newer build, so two quick pushes
+   can't end with the older one live. The trigger must use the repository's `cloudbuild.yaml` (Configuration →
    Cloud Build configuration file, location `cloudbuild.yaml`), not the
    inline config the Cloud Run setup generated: that one updated only the
    web service and left the jobs on the image they were created with. Its

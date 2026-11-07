@@ -90,6 +90,22 @@ def test_dockerfile_bakes_the_commit_build_arg():
     assert "--build-arg=GIT_COMMIT_SHA=$COMMIT_SHA" in build
 
 
+def test_cloudbuild_deploys_only_the_newest_commit():
+    # overlapping builds finish in any order; every step that changes what
+    # runs must come after the newest-commit check and honour its skip marker
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    steps = yaml.safe_load((root / "cloudbuild.yaml").read_text())["steps"]
+    ids = [s["id"] for s in steps]
+    guard = ids.index("Newest commit?")
+    assert "refs/heads/$BRANCH_NAME" in steps[guard]["args"][1]
+    for i, step in enumerate(steps):
+        if "gcloud run" in " ".join(step.get("args", [])):
+            assert i > guard, step["id"]
+            assert "[ -e /workspace/.skip-deploy ] && exit 0" in step["args"][1]
+
+
 def test_ping_disabled_by_default(monkeypatch):
     called = []
     monkeypatch.setattr(

@@ -59,3 +59,33 @@ def testapp():
     yield {"client": TestClient(app), "Session": lambda: Session(engine),
            "user_id": user_id}
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def browser_page(testapp):
+    """A headless Chromium page whose requests to http://testserver are served
+    by testapp's TestClient, so pages run their real app.js against test data.
+
+    Skips when Playwright's Chromium isn't installed (`uv run playwright install
+    chromium`), except on CI, where a missing browser fails the test instead.
+    """
+    sync_api = pytest.importorskip("playwright.sync_api")
+    client = testapp["client"]
+
+    def serve(route):
+        req = route.request
+        r = client.request(req.method, req.url, headers=req.headers,
+                           content=req.post_data_buffer, follow_redirects=False)
+        route.fulfill(status=r.status_code, headers=dict(r.headers), body=r.content)
+
+    with sync_api.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except sync_api.Error as e:
+            if os.environ.get("CI"):
+                raise
+            pytest.skip(f"Chromium for Playwright not installed: {e.message.splitlines()[0]}")
+        page = browser.new_page()
+        page.route("http://testserver/**", serve)
+        yield page
+        browser.close()

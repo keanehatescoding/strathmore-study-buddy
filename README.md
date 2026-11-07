@@ -88,3 +88,6 @@ on Postgres instead, wiping that database's `public` schema before every
 test — CI runs both, plus `ruff check .` and a full migration
 upgrade → downgrade → upgrade round-trip.
 See `DEPLOY.md` for Railway/VPS deployment.
+
+A few tests drive the pages' JavaScript in headless Chromium; they skip
+until you run `.venv/bin/playwright install --only-shell chromium` once.

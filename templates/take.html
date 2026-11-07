@@ -66,7 +66,7 @@
   {% if error %}
   <div class="notice notice-error" role="alert">{{ error }}</div>
   {% endif %}
-  <form method="post" action="/review/{{ item.id }}/answer{{ scope }}" class="answer-form">
+  <form method="post" action="/review/{{ item.id }}/answer{{ scope }}" class="answer-form" data-submit-once>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
     {% if item.question_type == "mcq" %}
@@ -91,14 +91,14 @@
       <a href="/review{{ scope }}">Back to queue</a>
     </div>
   </form>
-  <form id="skip-form" method="post" action="/review/{{ item.id }}/skip{{ scope }}">
+  <form id="skip-form" method="post" action="/review/{{ item.id }}/skip{{ scope }}" data-submit-once>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   </form>
   {% endif %}
 
   <details class="report">
     <summary>Something wrong with this question?</summary>
-    <form method="post" action="/review/{{ item.id }}/suspend{{ scope }}" class="report-form">
+    <form method="post" action="/review/{{ item.id }}/suspend{{ scope }}" class="report-form" data-submit-once>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <p class="section-note">Suspending takes it out of your reviews. You can bring it back from the queue page.</p>
       <label for="suspend-reason">What's wrong?</label>

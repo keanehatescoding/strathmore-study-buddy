@@ -70,6 +70,66 @@ def test_review_flow(testapp):
     assert r.status_code == 200 and "100.0%" in r.text and "1 day" in r.text
 
 
+def test_question_page_forms_submit_once(testapp):
+    # every form that posts away from the question is guarded by app.js
+    client, Session = testapp["client"], testapp["Session"]
+    _seed(Session)
+    html = client.get("/review/take").text
+    forms = re.findall(r"<form\b[^>]*>", html)
+    posts = [f for f in forms if 'method="post"' in f and "/logout" not in f]
+    actions = {re.search(r'action="/review/[^/]+/(\w+)', f).group(1) for f in posts}
+    assert actions == {"answer", "skip", "suspend"}
+    assert all("data-submit-once" in f for f in posts)
+
+
+def _submit_and_return(page, submit):
+    """Load the question, submit one form, then bring the page back as bfcache
+    would. Returns the guarded buttons' disabled states after each step."""
+    page.goto("http://testserver/review/take")
+    # app.js's submit handlers run first; this one stops the actual POST so
+    # the page stays put and its button states can be read
+    page.evaluate("document.addEventListener('submit', e => e.preventDefault())")
+    buttons = page.locator("form[data-submit-once] button[type=submit], "
+                           "button[type=submit][form=skip-form]")
+    assert buttons.count() == 3  # Submit, Skip for now, Suspend question
+
+    def disabled():
+        return buttons.evaluate_all("bs => bs.map(b => b.disabled)")
+
+    assert disabled() == [False] * 3
+    submit()
+    after_submit = disabled()
+    page.evaluate("window.dispatchEvent("
+                  "new PageTransitionEvent('pageshow', {persisted: true}))")
+    return after_submit, disabled()
+
+
+def _submit_answer(page):
+    page.locator(".option-label").nth(1).click()  # the styled label covers the radio
+    page.get_by_role("button", name="Submit").click()
+
+
+def _skip(page):
+    page.get_by_role("button", name="Skip for now").click()
+
+
+def _suspend(page):
+    page.get_by_text("Something wrong with this question?").click()
+    page.get_by_role("button", name="Suspend question").click()
+
+
+@pytest.mark.parametrize("submit", [_submit_answer, _skip, _suspend],
+                         ids=["answer", "skip", "suspend"])
+def test_submit_locks_buttons_and_pageshow_unlocks_them(testapp, browser_page, submit):
+    # one submission disables all three (each leaves the page), and Back
+    # (pageshow from bfcache) must re-enable them or the question is stuck
+    _seed(testapp["Session"])
+    after_submit, after_pageshow = _submit_and_return(browser_page,
+                                                      lambda: submit(browser_page))
+    assert after_submit == [True] * 3
+    assert after_pageshow == [False] * 3
+
+
 def test_review_wrong_answer(testapp):
     client, Session = testapp["client"], testapp["Session"]
     item_id = _seed(Session)

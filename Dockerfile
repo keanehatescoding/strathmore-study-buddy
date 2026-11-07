@@ -26,8 +26,15 @@ COPY templates/ templates/
 COPY static/ static/
 COPY app/ app/
 USER app
+# The commit this image was built from, for /version and the startup logs.
+# cloudbuild.yaml passes --build-arg GIT_COMMIT_SHA=$COMMIT_SHA; a plain
+# `docker build` leaves it empty and the app reports "unknown" (buildah may
+# reuse a cached layer from an earlier build that had the arg; --no-cache
+# avoids that). Last, so a new commit doesn't invalidate the layers above.
+ARG GIT_COMMIT_SHA=
+ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 
-# Platforms with their own checks (Railway) ignore this; plain docker/podman
+# Platforms with their own checks (Cloud Run) ignore this; plain docker/podman
 # use it. Non-web services started from this image (worker, crons) should
 # override it with --no-healthcheck / healthcheck.disable.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

@@ -440,6 +440,21 @@ def test_no_api_key_sends_nothing(session, monkeypatch):
     assert calls == []
 
 
+@pytest.mark.parametrize("sender", ["", "  "])
+def test_no_sender_sends_nothing_and_keeps_attempts(session, monkeypatch, caplog, sender):
+    # EMAIL_FROM unset: Resend would reject every send, so a pass must not
+    # burn the events' attempts (MAX_SEND_ATTEMPTS would give them up a day later)
+    calls = _fake_batches(monkeypatch)
+    _owned_events(session, 2)
+    with caplog.at_level("WARNING", logger="app.notify"):
+        assert notify.send_pending(session, "key", sender) == {
+            "sent": 0, "failed": 2, "errors": {"no_sender": 2}}
+    assert calls == []
+    assert "EMAIL_FROM is empty" in caplog.text
+    for event in session.exec(select(NotificationEvent)).all():
+        assert event.attempts == 0 and not event.sent and event.failed_reason is None
+
+
 def _http_429(retry_after="1.5"):
     return urllib.error.HTTPError(
         notify.RESEND_BATCH_URL, 429, "Too Many Requests",

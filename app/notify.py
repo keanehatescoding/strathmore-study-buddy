@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -42,6 +43,8 @@ from sqlmodel import Session, func, select
 
 from app.grade import _aware, due_count
 from app.models import Course, NotificationEvent, Resource, ReviewLog, Topic, User
+
+log = logging.getLogger(__name__)
 
 REVIEW_DUE_THRESHOLD = 3
 REVIEW_DUE_COOLDOWN = timedelta(hours=23)  # daily, without drifting an hour a day
@@ -430,9 +433,16 @@ def send_pending(
             session.add(event)
         else:
             live.append(event)
-    if not api_key:  # nothing can be delivered; don't fake-mark or split batches
+    # Nothing can be delivered without a key or a sender (Resend rejects a
+    # blank "from"): leave the events queued with their attempts untouched,
+    # instead of spending one per pass until they give up.
+    if missing := ("no_api_key" if not api_key
+                   else "no_sender" if not from_addr.strip() else None):
         session.commit()
-        errors["no_api_key"] += len(live)
+        errors[missing] += len(live)
+        if live:
+            log.warning("not sending %d notification(s): %s is empty", len(live),
+                        "RESEND_API_KEY" if missing == "no_api_key" else "EMAIL_FROM")
         return _result(sent, errors)
     events = live
     for event in events:  # claim: enqueue_new_material merges only untried events

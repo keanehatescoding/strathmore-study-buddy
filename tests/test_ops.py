@@ -1,5 +1,7 @@
 """Ops tests: DB-aware /health, /version, worker healthcheck ping, DATABASE_URL driver."""
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
@@ -49,8 +51,10 @@ def test_health_503_when_db_unreachable():
         assert r.json() == {"status": "degraded", "db": "unreachable"}
 
 
-def test_version_reports_railway_commit(monkeypatch, caplog):
-    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "8490f56abc")
+def test_version_reports_the_baked_commit(monkeypatch, caplog):
+    # cloudbuild.yaml bakes GIT_COMMIT_SHA into the image
+    monkeypatch.setenv("GIT_COMMIT_SHA", "8490f56abc")
+    monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
     for client in _client(_engine(True)):
         with caplog.at_level("INFO", logger="uvicorn.error"), client:
             r = client.get("/version")
@@ -58,10 +62,48 @@ def test_version_reports_railway_commit(monkeypatch, caplog):
     assert "starting web at commit 8490f56abc" in caplog.text
 
 
+def test_version_falls_back_to_railway_commit(monkeypatch):
+    monkeypatch.delenv("GIT_COMMIT_SHA", raising=False)
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "c93d188")
+    for client in _client(_engine(True)):
+        assert client.get("/version").json() == {"commit": "c93d188"}
+
+
 def test_version_unknown_outside_a_git_deploy(monkeypatch):
-    monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
+    from app.config import COMMIT_ENV_VARS
+
+    for name in COMMIT_ENV_VARS:
+        monkeypatch.setenv(name, "  ")  # blank (an empty build arg) counts as unset
     for client in _client(_engine(True)):
         assert client.get("/version").json() == {"commit": "unknown"}
+
+
+def test_dockerfile_bakes_the_commit_build_arg():
+    # cloudbuild.yaml passes --build-arg GIT_COMMIT_SHA=$COMMIT_SHA; the image
+    # must keep it as an env var, or /version and the job logs say "unknown"
+    root = Path(__file__).resolve().parent.parent
+    dockerfile = (root / "Dockerfile").read_text()
+    final_stage = dockerfile.rsplit("\nFROM ", 1)[1]
+    assert "ARG GIT_COMMIT_SHA" in final_stage
+    assert "ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}" in final_stage
+    build = (root / "cloudbuild.yaml").read_text()
+    assert "--build-arg=GIT_COMMIT_SHA=$COMMIT_SHA" in build
+
+
+def test_cloudbuild_deploys_only_the_newest_commit():
+    # overlapping builds finish in any order; every step that changes what
+    # runs must come after the newest-commit check and honour its skip marker
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    steps = yaml.safe_load((root / "cloudbuild.yaml").read_text())["steps"]
+    ids = [s["id"] for s in steps]
+    guard = ids.index("Newest commit?")
+    assert "refs/heads/$BRANCH_NAME" in steps[guard]["args"][1]
+    for i, step in enumerate(steps):
+        if "gcloud run" in " ".join(step.get("args", [])):
+            assert i > guard, step["id"]
+            assert "[ -e /workspace/.skip-deploy ] && exit 0" in step["args"][1]
 
 
 def test_ping_disabled_by_default(monkeypatch):

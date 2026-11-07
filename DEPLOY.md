@@ -246,7 +246,9 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   Neither touches `ALLOWED_EMAILS`: signing in again starts an empty account.
 - Moodle password sign-in (`/settings/moodle`) is limited to 5 attempts per
   15 minutes per account and per Moodle username, so it can't be used to
-  guess another student's password. Like the POST limit, it is per-process.
+  guess another student's password. The count is stored in Postgres
+  (`login_attempts`), so every instance shares it (see the rate-limiting
+  note above).
 - Cron observability: set `HEALTHCHECK_PING_URL` (e.g. a healthchecks.io
   check) — the worker pings it after every pass (every minute with
   `--loop 60`) and every 5 minutes while a long pass is still draining a

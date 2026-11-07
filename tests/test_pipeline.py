@@ -806,7 +806,8 @@ def test_main_runs_the_stages_its_flags_pick(session, monkeypatch, flag, stages,
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "llm_clients", lambda: ("chunk", "quiz"))
     monkeypatch.setattr(pipeline, "run_course",
-                        lambda s, source, cid, c, q, pace, stages: ran.append((c, q, stages)))
+                        lambda s, source, cid, c, q, pace, stages, deadline: ran.append(
+                            (c, q, stages)) or {})
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", *([flag] if flag else [])])
     pipeline.main()
     llms = ("chunk", "quiz") if needs_llm else (None, None)
@@ -834,7 +835,7 @@ def test_main_waits_only_behind_a_pipeline_job(session, monkeypatch, capsys, job
 
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "single_run", single_run)
-    monkeypatch.setattr(pipeline, "run_course", lambda *a, **kw: ran.append(1))
+    monkeypatch.setattr(pipeline, "run_course", lambda *a, **kw: ran.append(1) or {})
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", "--extract-only"])
     pipeline.main()
     if job_running:
@@ -843,6 +844,87 @@ def test_main_waits_only_behind_a_pipeline_job(session, monkeypatch, capsys, job
     else:
         assert calls == [False] and ran == []
         assert "in progress; exiting" in capsys.readouterr().out
+
+
+def _cli(session, monkeypatch, argv, run_course):
+    import app.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "engine", session.get_bind())
+    monkeypatch.setattr(pipeline, "run_course", run_course)
+    monkeypatch.setattr("sys.argv", ["pipeline", *argv, "--extract-only"])
+    return pipeline
+
+
+def test_main_shares_the_time_budget_between_sources(session, monkeypatch):
+    # #149: a 12 h Cloud Run timeout used to kill the run, and Classroom
+    # only started once Moodle was done, so a Moodle backlog starved it
+    clock = [1000.0]
+    ran = []
+
+    def run_course(s, source, cid, c, q, pace, stages, deadline):
+        ran.append((source, deadline - clock[0]))
+        clock[0] += 60  # moodle needed one minute of its share
+        return {}
+
+    pipeline = _cli(session, monkeypatch, ["--source", "moodle", "--source", "classroom",
+                                           "--max-minutes", "600"], run_course)
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: clock[0])
+    pipeline.main()
+    # half each up front; what moodle didn't use goes to classroom
+    assert ran == [("moodle", 300 * 60), ("classroom", 599 * 60)]
+
+
+def test_main_without_a_budget_has_no_deadline(session, monkeypatch):
+    seen = []
+    pipeline = _cli(session, monkeypatch, [], lambda *a, deadline, **kw: seen.append(
+        (a[1], deadline)) or {})
+    pipeline.main()
+    assert seen == [("moodle", None)]  # --source defaults to moodle
+
+
+def test_main_stops_a_source_whose_time_is_up(session, monkeypatch, capsys):
+    from app.models import User
+    from app.pipeline import StageResult
+
+    for n in range(2):  # two users' copies of one course
+        user = User(email=f"u{n}@x.edu")
+        session.add(user)
+        session.commit()
+        session.add(Course(source="moodle", source_id="42", name="c", user_id=user.id))
+    session.commit()
+    ran = []
+
+    def run_course(*a, **kw):
+        ran.append(a[2])
+        return {"extraction": StageResult(out_of_time=True)}
+
+    pipeline = _cli(session, monkeypatch, ["--course", "42", "--max-minutes", "5"], run_course)
+    pipeline.main()
+    assert len(ran) == 1  # the second copy waits for the next run
+    assert "time budget used up" in capsys.readouterr().out
+
+
+def test_main_stops_cleanly_on_sigterm(session, monkeypatch, capsys):
+    import signal
+
+    from app.jobs import Shutdown
+
+    released = []
+
+    def run_course(*a, **kw):
+        handler = signal.getsignal(signal.SIGTERM)
+        handler(signal.SIGTERM, None)  # what Cloud Run's timeout sends
+
+    monkeypatch.setattr(signal, "signal", lambda sig, h: released.append((sig, h)))
+    monkeypatch.setattr(signal, "getsignal", lambda sig: dict(released)[sig])
+    pipeline = _cli(session, monkeypatch, ["--source", "moodle", "--source", "classroom"],
+                    run_course)
+    with pytest.raises(SystemExit) as stop:
+        pipeline.main()
+    assert stop.value.code == 143
+    assert "stopped on SIGTERM" in capsys.readouterr().out
+    assert (signal.SIGTERM, signal.SIG_IGN) in released  # a second one can't interrupt cleanup
+    assert issubclass(Shutdown, BaseException)
 
 
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="advisory locks need Postgres")

@@ -43,7 +43,7 @@ from it with different commands.
    |---|---|---|---|
    | `study-buddy-worker` | `alembic upgrade head && exec python -m app.worker --notify-every 3600` | `*/5 * * * *` | 1 h |
    | `study-buddy-sync` | `alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && exec python -m app.worker` | `0 3 * * *` | 2 h |
-   | `study-buddy-pipeline` | `alembic upgrade head && python -m app.pipeline --source moodle --pace 45 && exec python -m app.pipeline --source classroom --pace 45` | `0 6 * * *` | 12 h |
+   | `study-buddy-pipeline` | `alembic upgrade head && exec python -m app.pipeline --source moodle --source classroom --pace 45 --max-minutes 660` | `0 6 * * *` | 12 h |
 
    Cloud Run has no always-on worker, so `study-buddy-worker` is a single
    pass every 5 minutes instead of `--loop 60`: a sync queued at sign-in
@@ -60,6 +60,15 @@ from it with different commands.
    right away. Events are marked once sent, so the extra pass never emails
    anyone twice. The pipeline gets its own slot after the sync, since paced
    LLM runs take hours and the free Gemini tier rate-limits hard.
+
+   Long-running steps are `exec`'d: until then `sh` is PID 1, which ignores
+   the SIGTERM Cloud Run sends on a timeout or cancel, so the step would be
+   killed 10 s later without cleaning up. The pipeline job runs both sources
+   in one process with `--max-minutes 660`, shared between them (time one
+   doesn't need goes to the other), so it stops between items an hour
+   before the 12 h timeout, and Classroom gets its turn however long the
+   Moodle backlog is. `--pace` overrides `LLM_PACE`, so the pipeline job
+   needs no `LLM_PACE` of its own.
 
    Every service and job starts with `alembic upgrade head`: one running new
    code against an old schema fails (e.g. `column ... does not exist`). It
@@ -140,7 +149,7 @@ Cron (daily 06:00 sync + notify for every connected user):
 Pipeline (daily 09:00, after the sync; paced LLM runs take hours):
 
 ```
-0 9 * * * cd /srv/study-buddy && .venv/bin/python -m app.pipeline --source moodle --pace 45 && .venv/bin/python -m app.pipeline --source classroom --pace 45
+0 9 * * * cd /srv/study-buddy && .venv/bin/python -m app.pipeline --source moodle --source classroom --pace 45 --max-minutes 1380
 ```
 
 The pipeline runs from cron (or by hand for a backfill). The one exception
@@ -163,6 +172,11 @@ job is just starting or deferring; the next run picks the work up); and a
 minutes. Work
 on a resource whose content a sync replaced mid-run is dropped (`changed=` in
 the tallies) and redone from the new content.
+`--max-minutes` stops a run between items once its time is up
+(`out of time` in the tallies, then "time budget used up"); the next run
+resumes. Keep it below the next run's start (or the job's timeout), since
+an overlapping run for the same source just exits. SIGTERM stops a run
+the same way, with exit code 143.
 The quiz/chunk runners abort early with `quota_exhausted` when the LLM
 quota is gone; re-run the same command later to resume (completed chunks
 are skipped via generation keys).

@@ -43,8 +43,21 @@ class ChunkingError(RuntimeError):
 
 
 class ChunkingDeadline(RuntimeError):
-    """The run's time budget ran out mid-resource. Nothing is stored: a
-    deadline stop is transient, so a later run chunks the whole text again."""
+    """The run's time budget ran out mid-resource. Completed sections are
+    preserved as a checkpoint (see chunk_resource) so the next run resumes
+    instead of restarting; the checkpoint is not final, so its chunks are
+    not stored until every section has succeeded."""
+
+    def __init__(self, message="time budget exhausted", completed=None,
+                 resume_from=0):
+        super().__init__(message)
+        self.completed = list(completed or [])
+        # aliases for callers/tests that name these differently
+        self.completed_chunks = self.completed
+        self.chunks = self.completed
+        self.resume_from = resume_from
+        self.next_section = resume_from
+        self.resume_at = resume_from
 
 SYSTEM = """You split study material into coherent chunks for quiz generation.
 Rules:
@@ -117,20 +130,36 @@ def locate(content: str, full: str) -> tuple[int | None, int | None]:
 
 def chunk_sections(sections: list[str], llm: LLMClient,
                    max_calls: int = MAX_SECTIONS,
-                   deadline: float | None = None) -> tuple[list[dict], int]:
+                   deadline: float | None = None,
+                   resume_from: int = 0) -> tuple[list[dict], int]:
     """Chunk sections in order with at most max_calls LLM calls, halves of a
     truncated section included. Returns (chunks, sections left unstudied) for
     a cap stop. Raises ChunkingDeadline when the deadline passes: a deadline
     stop must not be stored as a final, cached result."""
     import time
     out, calls = [], 0
-    todo = [(i, s) for i, s in reversed(list(enumerate(sections)))]  # a stack
+    # only sections not already checkpointed are processed
+    todo = [(i, s) for i, s in reversed(list(enumerate(sections)))
+            if i >= resume_from]  # a stack
+    current_i = None
+    current_chunks: list[dict] = []
+    # next original section to process (resume point while one is in flight)
+    next_section = resume_from
     while todo:
         if calls >= max_calls:
-            return out, len({i for i, _ in todo})
+            # cap stop is final: keep whatever is in flight too
+            return out + current_chunks, len({i for i, _ in todo})
         if deadline is not None and time.monotonic() >= deadline:
-            raise ChunkingDeadline("time budget exhausted")
+            raise ChunkingDeadline(
+                "time budget exhausted", completed=out, resume_from=next_section)
         i, section = todo.pop()
+        # a new original section starts: the previous one is complete
+        if current_i is not None and i != current_i:
+            out.extend(current_chunks)
+            current_chunks = []
+            next_section = i
+        current_i = i
+        next_section = i
         calls += 1
         try:
             data = llm.complete_json(
@@ -145,8 +174,18 @@ def chunk_sections(sections: list[str], llm: LLMClient,
             # the reply outgrew the output limit: two halves fit
             halves = presplit(section, len(section) // 2 + 1)
             todo.extend((i, h) for h in reversed(halves))
+            # section stays in flight until all of its halves are done
             continue
-        out.extend(c.model_dump() for c in ChunkReply.model_validate(data).chunks)
+        chunks = [c.model_dump() for c in ChunkReply.model_validate(data).chunks]
+        current_chunks.extend(chunks)
+        # if nothing with the same index remains, this section is complete
+        if not any(x[0] == i for x in todo):
+            out.extend(current_chunks)
+            current_chunks = []
+            current_i = None
+            next_section = i + 1
+    # promote anything left in flight (last section)
+    out.extend(current_chunks)
     return out, 0
 
 
@@ -207,13 +246,35 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
     text = resource.extracted_text or ""
     note = text_cap_note(resource.error)
     seen_hash = resource.content_hash  # loaded with the text: what it is of
+    # a previous deadline stop may have preserved a checkpoint; resume from it
+    checkpoint = getattr(resource, "chunk_checkpoint", None)
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    resume_from = int(checkpoint.get("next_section", 0) or 0)
+    completed_chunks = list(checkpoint.get("chunks") or [])
     if not text.strip():
         items = []
+        resource.chunk_checkpoint = None
     elif needs_llm(resource):
         sections = presplit(text)
-        items, left = chunk_sections(
-            sections, llm, deadline=deadline
-        )  # paid work: before any delete
+        # if the checkpoint already covers everything, just finalize it
+        try:
+            new_chunks, left = chunk_sections(
+                sections, llm, deadline=deadline, resume_from=resume_from
+            )  # paid work: before any delete
+        except ChunkingDeadline as e:
+            # preserve the sections done so far as a resumable checkpoint,
+            # without storing (or marking) them as final chunks
+            ckpt_chunks = completed_chunks + list(e.completed)
+            resource.chunk_checkpoint = {
+                "next_section": int(e.resume_from),
+                "chunks": ckpt_chunks,
+            }
+            session.add(resource)
+            if not commit_if_current(session, resource.id, seen_hash, seen_text=text):
+                raise ContentChanged(resource.id) from e
+            raise
+        items = completed_chunks + new_chunks
         if left:
             capped = f"{len(sections) - left} of {len(sections)} {SECTIONS_CAPPED}"
             # keep both: the text was cut, then only part of what's left chunked
@@ -221,8 +282,11 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
                     else f"{CAPPED_PREFIX}{capped}")
         if not items:
             raise ChunkingError("chunker produced no chunks")
+        # finished: drop any checkpoint
+        resource.chunk_checkpoint = None
     else:
         items = [{"title": text.strip()[:80], "content": text}]
+        resource.chunk_checkpoint = None
     # content changed -> regenerate, don't version; explicit purge so quiz
     # items and reviews of the old chunks go too on SQLite (no FK cascade)
     if existing:

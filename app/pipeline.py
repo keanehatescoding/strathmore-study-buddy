@@ -30,7 +30,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlmodel import Session, delete, func, or_, select
 
-from app.chunk import FAILED_JOIN, chunk_resource, needs_llm, text_cap_note
+from app.chunk import (
+    FAILED_JOIN,
+    ChunkingDeadline,
+    chunk_resource,
+    needs_llm,
+    text_cap_note,
+)
 from app.config import settings
 from app.db import engine
 from app.drive import DriveError
@@ -365,6 +371,12 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             continue
         try:
             n = chunk_resource(session, r, llm, deadline=deadline)
+        except ChunkingDeadline:
+            # nothing was stored: the resource is still chunkable next run
+            session.rollback()
+            result.out_of_time = True
+            print("  out of time, stopping run (resumable)", flush=True)
+            break
         except QuotaExhaustedError as e:
             print(f"  quota exhausted, stopping run (resumable): {str(e)[:120]}",
                   flush=True)

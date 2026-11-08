@@ -6,7 +6,9 @@
   section whose reply is truncated is halved and retried.
 - At most MAX_SECTIONS calls are made per resource, retried halves included:
   a backstop behind the extraction cap (app.extract.MAX_EXTRACTED_CHARS) for
-  text extracted before it, and for replies that keep truncating.
+  text extracted before it, and for replies that keep truncating. A cap stop
+  is permanent, so its partial result is final; a deadline stop is transient,
+  so it raises and stores nothing, letting a later run start over.
 - Short texts skip the LLM entirely (single chunk, no cost).
 - Cache: resources that already have chunks and status "extracted" are
   skipped; status "pending" with stale chunks means content changed ->
@@ -38,6 +40,11 @@ FAILED_JOIN = ". Chunking failed: "  # character cap note + retryable error
 
 class ChunkingError(RuntimeError):
     """The chunker returned no usable chunks; existing chunks are kept."""
+
+
+class ChunkingDeadline(RuntimeError):
+    """The run's time budget ran out mid-resource. Nothing is stored: a
+    deadline stop is transient, so a later run chunks the whole text again."""
 
 SYSTEM = """You split study material into coherent chunks for quiz generation.
 Rules:
@@ -112,7 +119,9 @@ def chunk_sections(sections: list[str], llm: LLMClient,
                    max_calls: int = MAX_SECTIONS,
                    deadline: float | None = None) -> tuple[list[dict], int]:
     """Chunk sections in order with at most max_calls LLM calls, halves of a
-    truncated section included. Returns (chunks, sections left unstudied)."""
+    truncated section included. Returns (chunks, sections left unstudied) for
+    a cap stop. Raises ChunkingDeadline when the deadline passes: a deadline
+    stop must not be stored as a final, cached result."""
     import time
     out, calls = [], 0
     todo = [(i, s) for i, s in reversed(list(enumerate(sections)))]  # a stack
@@ -120,7 +129,7 @@ def chunk_sections(sections: list[str], llm: LLMClient,
         if calls >= max_calls:
             return out, len({i for i, _ in todo})
         if deadline is not None and time.monotonic() >= deadline:
-            return out, len({i for i, _ in todo})
+            raise ChunkingDeadline("time budget exhausted")
         i, section = todo.pop()
         calls += 1
         try:
@@ -179,10 +188,11 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
 
     Returns 0 without touching anything when cached, or when the text is long
     enough to need an LLM and none was given (extract-only runs must not mark
-    resources failed or drop their existing chunks). LLM errors and an empty
-    result (ChunkingError) raise before any existing chunk is touched, and
-    ContentChanged rolls everything back when a sync replaced the content
-    meanwhile (the chunks would be of the old text).
+    resources failed or drop their existing chunks). LLM errors, a deadline
+    stop (ChunkingDeadline) and an empty result (ChunkingError) raise before
+    any existing chunk is touched, and ContentChanged rolls everything back
+    when a sync replaced the content meanwhile (the chunks would be of the
+    old text).
     """
     from app.sync import ContentChanged, _purge_derived, commit_if_current
 

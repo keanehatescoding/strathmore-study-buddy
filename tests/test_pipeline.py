@@ -499,6 +499,47 @@ def test_truncation_on_a_small_section_raises():
         chunk_sections(["x" * 500], TruncatingLLM(100))
 
 
+def test_a_deadline_stop_raises_instead_of_returning_partial(monkeypatch):
+    import time
+
+    from app.chunk import ChunkingDeadline, chunk_sections
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    class SlowLLM:
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10
+            return {"chunks": [{"title": "T", "content": "x"}]}
+
+    with pytest.raises(ChunkingDeadline):
+        chunk_sections(["a", "b"], SlowLLM(), deadline=5.0)
+
+
+def test_a_deadline_stop_leaves_the_resource_resumable(session, monkeypatch):
+    import time
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    text = "para\n\n" * 5000  # several sections, so the deadline can hit mid-way
+
+    class SlowLLM(FakeLLM):
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10  # the first call uses up the budget
+            return super().complete_json(system, user, **kw)
+
+    r = _resource(session, status="extracted", extracted_text=text)
+    result = run_chunking(session, SlowLLM(), deadline=5.0)
+    assert result.out_of_time and result.counts["errors"] == 0
+    session.refresh(r)
+    # nothing stored, no failure counted: a later run chunks the whole text
+    assert r.status == "extracted" and r.attempts == 0 and r.error is None
+    assert session.exec(select(Chunk)).all() == []
+
+    assert chunk_resource(session, r, FakeLLM()) == 2 * len(presplit(text))
+    assert r.error is None
+
+
 class MessyLLM:
     def __init__(self, chunks):
         self.chunks = chunks

@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from sqlmodel import Session, select
 
 from app.extract import CAPPED_PREFIX, is_cap_note
@@ -250,6 +252,9 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
     checkpoint = getattr(resource, "chunk_checkpoint", None)
     if not isinstance(checkpoint, dict):
         checkpoint = {}
+    text_id = hashlib.sha256(text.encode()).hexdigest()
+    if checkpoint.get("text_id") != text_id:
+        checkpoint = {}  # made for different text: start over
     resume_from = int(checkpoint.get("next_section", 0) or 0)
     completed_chunks = list(checkpoint.get("chunks") or [])
     if not text.strip():
@@ -267,6 +272,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
             # without storing (or marking) them as final chunks
             ckpt_chunks = completed_chunks + list(e.completed)
             resource.chunk_checkpoint = {
+                "text_id": text_id,
                 "next_section": int(e.resume_from),
                 "chunks": ckpt_chunks,
             }

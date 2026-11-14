@@ -499,6 +499,47 @@ def test_truncation_on_a_small_section_raises():
         chunk_sections(["x" * 500], TruncatingLLM(100))
 
 
+def test_a_deadline_stop_raises_instead_of_returning_partial(monkeypatch):
+    import time
+
+    from app.chunk import ChunkingDeadline, chunk_sections
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    class SlowLLM:
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10
+            return {"chunks": [{"title": "T", "content": "x"}]}
+
+    with pytest.raises(ChunkingDeadline):
+        chunk_sections(["a", "b"], SlowLLM(), deadline=5.0)
+
+
+def test_a_deadline_stop_leaves_the_resource_resumable(session, monkeypatch):
+    import time
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    text = "para\n\n" * 5000  # several sections, so the deadline can hit mid-way
+
+    class SlowLLM(FakeLLM):
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10  # the first call uses up the budget
+            return super().complete_json(system, user, **kw)
+
+    r = _resource(session, status="extracted", extracted_text=text)
+    result = run_chunking(session, SlowLLM(), deadline=5.0)
+    assert result.out_of_time and result.counts["errors"] == 0
+    session.refresh(r)
+    # nothing stored, no failure counted: a later run chunks the whole text
+    assert r.status == "extracted" and r.attempts == 0 and r.error is None
+    assert session.exec(select(Chunk)).all() == []
+
+    assert chunk_resource(session, r, FakeLLM()) == 2 * len(presplit(text))
+    assert r.error is None
+
+
 class MessyLLM:
     def __init__(self, chunks):
         self.chunks = chunks
@@ -806,11 +847,30 @@ def test_main_runs_the_stages_its_flags_pick(session, monkeypatch, flag, stages,
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "llm_clients", lambda: ("chunk", "quiz"))
     monkeypatch.setattr(pipeline, "run_course",
-                        lambda s, source, cid, c, q, pace, stages: ran.append((c, q, stages)))
+                        lambda s, source, cid, c, q, pace, stages, deadline=None:
+                        ran.append((c, q, stages, deadline)) or {})
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", *([flag] if flag else [])])
     pipeline.main()
     llms = ("chunk", "quiz") if needs_llm else (None, None)
-    assert [(c, q, tuple(st)) for c, q, st in ran] == [(*llms, stages)]
+    assert [(c, q, tuple(st), d) for c, q, st, d in ran] == [(*llms, stages, None)]
+
+
+@pytest.mark.parametrize("minutes, expected", [(None, None), (90, 90 * 60)])
+def test_main_turns_max_minutes_into_a_deadline(session, monkeypatch, minutes, expected):
+    import app.pipeline as pipeline
+
+    seen = []
+    monkeypatch.setattr(pipeline, "engine", session.get_bind())
+    monkeypatch.setattr(pipeline, "run_course",
+                        lambda s, source, cid, c, q, pace, stages, deadline=None:
+                        seen.append(deadline) or {})
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: 1000.0)
+    argv = ["pipeline", "--source", "moodle", "--extract-only"]
+    if minutes is not None:
+        argv += ["--max-minutes", str(minutes)]
+    monkeypatch.setattr("sys.argv", argv)
+    pipeline.main()
+    assert seen == [None if expected is None else 1000.0 + expected]
 
 
 @pytest.mark.parametrize("job_running", [True, False])
@@ -828,13 +888,13 @@ def test_main_waits_only_behind_a_pipeline_job(session, monkeypatch, capsys, job
     calls, ran = [], []
 
     @contextmanager
-    def single_run(source, bind=None, wait=False):
+    def single_run(source, bind=None, wait=False, deadline=None):
         calls.append(wait)
         yield wait  # the try fails; a blocking wait gets the lock
 
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
     monkeypatch.setattr(pipeline, "single_run", single_run)
-    monkeypatch.setattr(pipeline, "run_course", lambda *a, **kw: ran.append(1))
+    monkeypatch.setattr(pipeline, "run_course", lambda *a, **kw: ran.append(1) or {})
     monkeypatch.setattr("sys.argv", ["pipeline", "--source", "moodle", "--extract-only"])
     pipeline.main()
     if job_running:
@@ -1517,3 +1577,78 @@ def test_completed_quiz_run_queues_new_material_once(session):
     assert run_quiz(session, FlakyQuizLLM(fail=0)).counts["events"] == 1
     [event] = _new_material(session)
     assert event.payload["new_items"] == 2
+
+
+def test_a_resumed_resource_keeps_its_call_budget(monkeypatch):
+    """Calls made before a deadline stop count against MAX_SECTIONS on resume:
+    the per-resource cap must not reset each run."""
+    import time
+
+    from app.chunk import MAX_SECTIONS, ChunkingDeadline, chunk_sections
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    sections = [f"s{i}" for i in range(MAX_SECTIONS + 5)]
+
+    class SlowLLM:
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10
+            return {"chunks": [{"title": "T", "content": "x"}]}
+
+    with pytest.raises(ChunkingDeadline) as info:
+        chunk_sections(sections, SlowLLM(), deadline=25.0)
+    first_calls = info.value.calls
+    assert first_calls == 3  # calls at t=0, 10, 20; the t=30 check stops it
+
+    # resume with the cumulative count: the cap leaves only the remaining budget
+    clock[0] = 0.0
+    calls = []
+
+    class CountingLLM:
+        def complete_json(self, system, user, **kw):
+            calls.append(1)
+            return {"chunks": [{"title": "T", "content": "x"}]}
+
+    _, left = chunk_sections(
+        sections, CountingLLM(), resume_from=info.value.resume_from,
+        calls_before=first_calls,
+    )
+    assert len(calls) == MAX_SECTIONS - first_calls
+    assert left > 0  # the rest is past the per-resource cap
+
+
+def test_an_interrupted_split_resumes_without_repeating_calls(session, monkeypatch):
+    """A section cut off mid-split keeps its finished halves and unsent halves
+    in the checkpoint: the resumed run makes exactly the calls an
+    uninterrupted run makes, and stores the same chunks."""
+    import time
+
+    from app.chunk import ChunkingDeadline, chunk_resource, chunk_sections
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    text = ("word " * 1600).strip()  # one section, halved until it fits
+
+    fresh = TruncatingLLM(1500)
+    expected, _ = chunk_sections([text], fresh)
+
+    class BudgetLLM(TruncatingLLM):
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10  # three calls fit in each run
+            return super().complete_json(system, user, **kw)
+
+    llm = BudgetLLM(1500)
+    r = _resource(session, status="extracted", extracted_text=text)
+    runs = 0
+    while True:
+        runs += 1
+        assert runs <= 10
+        clock[0] = 0.0
+        try:
+            stored = chunk_resource(session, r, llm, deadline=25.0)
+            break
+        except ChunkingDeadline:
+            continue
+    assert runs > 1  # the deadline really interrupted the split
+    assert stored == len(expected)
+    assert len(llm.sizes) == len(fresh.sizes)  # no call was repeated

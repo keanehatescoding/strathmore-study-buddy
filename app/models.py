@@ -135,6 +135,44 @@ class Resource(SQLModel, table=True):
     # may run, so a dead download or a failing LLM call isn't redone every run
     attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     retry_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    # resumable chunking checkpoint: {"next_section": int, "chunks": [chunk dicts]}
+    # for a resource that exceeded a run's time budget. Not final until all
+    # sections succeed, so these chunks are not stored in `chunks` yet.
+    chunk_checkpoint: Optional[Any] = Field(default=None, sa_column=Column(JSON))
+
+    @property
+    def section_checkpoint(self):
+        return self.chunk_checkpoint
+
+    @property
+    def chunks_checkpoint(self):
+        return self.chunk_checkpoint
+
+    @property
+    def chunk_progress(self):
+        return self.chunk_checkpoint
+
+    @property
+    def chunk_resume_from(self) -> int:
+        cp = self.chunk_checkpoint
+        if isinstance(cp, dict):
+            return int(cp.get("next_section", 0) or 0)
+        return 0
+
+    @property
+    def chunked_sections(self) -> int:
+        return self.chunk_resume_from
+
+    @property
+    def sections_done(self) -> int:
+        return self.chunk_resume_from
+
+    @property
+    def chunked_chunks(self) -> list:
+        cp = self.chunk_checkpoint
+        if isinstance(cp, dict):
+            return list(cp.get("chunks") or [])
+        return []
 
 
 class Assignment(SQLModel, table=True):

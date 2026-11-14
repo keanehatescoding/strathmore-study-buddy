@@ -58,6 +58,7 @@ class StageResult:
     out_of_time: bool = False  # stopped at its deadline; a re-run resumes
 
     def __str__(self) -> str:
+        """Counts plus why the stage stopped early, for the run log."""
         out = ", ".join(f"{k}={v}" for k, v in self.counts.items())
         if self.quota_exhausted:
             out += " (quota_exhausted: stopped, re-run to resume)"
@@ -98,6 +99,7 @@ RETRY_CAP = timedelta(hours=24)
 
 
 def _now() -> datetime:
+    """The current time in UTC, for retry_after comparisons."""
     return datetime.now(timezone.utc)
 
 
@@ -114,6 +116,7 @@ def _defer(r: Resource, error: str) -> None:
 
 
 def _succeeded(r: Resource) -> None:
+    """Clear a resource's failure backoff after a successful attempt."""
     r.attempts = 0
     r.retry_after = None
 
@@ -127,10 +130,12 @@ def _safe_rollback(session: Session) -> None:
 
 
 def _due():
+    """SQL filter: the resource is not in backoff, or its retry time has passed."""
     return or_(Resource.retry_after.is_(None), Resource.retry_after <= _now())
 
 
 def pending_resource_ids(session: Session, course_id=None, source=None) -> list:
+    """Ids of pending resources ready to extract, in id order."""
     q = (select(Resource.id).where(Resource.status == "pending", _due())
          .order_by(Resource.id))
     return session.exec(_scoped(q, course_id, source)).all()
@@ -138,6 +143,7 @@ def pending_resource_ids(session: Session, course_id=None, source=None) -> list:
 
 def chunkable_resource_ids(session: Session, course_id=None, source=None) -> list:
     # ids only: loading every extracted_text up front is what blew memory
+    """Ids of extracted resources ready to chunk. Ids only: loading every extracted_text up front is what exhausted memory."""
     q = (select(Resource.id)
          .where(Resource.extracted_text.is_not(None),
                 Resource.status.not_in(["failed", "skipped"]), _due())
@@ -172,6 +178,7 @@ def _owner_downloader_for(session: Session, make):
     cache: dict = {}
 
     def for_resource(r: Resource):
+        """Downloader for one resource, from its course owner's client, cached per owner."""
         topic = session.get(Topic, r.topic_id)
         course = session.get(Course, topic.course_id) if topic else None
         owner_id = course.user_id if course else None
@@ -184,10 +191,12 @@ def _owner_downloader_for(session: Session, make):
 
 
 def moodle_downloader_for(session: Session):
+    """Downloader for Moodle resources, using each owner's Moodle token."""
     from app.moodle import MoodleClient
     from app.moodle_tokens import token_for
 
     def make(user):
+        """Moodle download function for one user, or None if they have no token."""
         token = token_for(user)
         return MoodleClient(settings.moodle_base_url, token).download if token else None
 
@@ -200,6 +209,7 @@ def classroom_downloader_for(session: Session):
     from app.drive import DriveClient, build_service
 
     def make(user):
+        """Drive client for one user, or None if they have no Classroom token."""
         token = classroom_token_for(user)
         if not token:
             return None
@@ -241,6 +251,7 @@ def _save_db_failure(session: Session, rid, seen_hash, e: Exception) -> Resource
 def run_extraction(session: Session, downloader, course_id=None,
                    downloader_for=None, source=None,
                    deadline: float | None = None) -> StageResult:
+    """Download and extract pending resources. Stops between items once `deadline` (a time.monotonic() value) passes, and reports out_of_time."""
     result = StageResult(Counter(extracted=0, skipped=0, failed=0))
     counts = result.counts
     ids = pending_resource_ids(session, course_id, source)
@@ -324,6 +335,7 @@ def run_extraction(session: Session, downloader, course_id=None,
 
 def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
                  source=None, deadline: float | None = None) -> StageResult:
+    """Split extracted resources into chunks. Stops between items once `deadline` passes."""
     result = StageResult(Counter(chunks=0, cached=0, resources=0))
     counts = result.counts
     ids = chunkable_resource_ids(session, course_id, source)
@@ -448,6 +460,7 @@ def _quiz_failed(session: Session, chunk_id, attempt: int, e: Exception) -> int:
 
 def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
              pace: float = 0.0, source=None, deadline: float | None = None) -> StageResult:
+    """Generate quiz items for chunks not yet covered. Stops between items once `deadline` passes."""
     from uuid import UUID
 
     from app.notify import course_of_chunk, enqueue_new_material
@@ -539,6 +552,7 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
 
 
 def _lock_key(name: str) -> int:
+    """Stable signed 64-bit key for a named Postgres advisory lock."""
     digest = hashlib.sha256(name.encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)  # a Postgres bigint
 
@@ -690,6 +704,7 @@ def _stop_on_signal(signum, frame) -> None:
 
 
 def main() -> None:
+    """CLI entry point: parse flags, share any --max-minutes budget across sources, and run each source under its lock. SIGTERM stops the run cleanly with exit 143."""
     import signal
 
     from app.jobs import Shutdown

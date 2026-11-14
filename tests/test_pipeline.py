@@ -906,6 +906,7 @@ def test_main_waits_only_behind_a_pipeline_job(session, monkeypatch, capsys, job
 
 
 def _cli(session, monkeypatch, argv, run_course):
+    """Point the pipeline at the test DB, stub run_course, set argv, and return the module."""
     import app.pipeline as pipeline
 
     monkeypatch.setattr(pipeline, "engine", session.get_bind())
@@ -917,6 +918,7 @@ def _cli(session, monkeypatch, argv, run_course):
 def test_main_shares_the_time_budget_between_sources(session, monkeypatch):
     # #149: a 12 h Cloud Run timeout used to kill the run, and Classroom
     # only started once Moodle was done, so a Moodle backlog starved it
+    """Moodle's unused share of --max-minutes goes to Classroom."""
     clock = [1000.0]
     ran = []
 
@@ -934,6 +936,7 @@ def test_main_shares_the_time_budget_between_sources(session, monkeypatch):
 
 
 def test_main_without_a_budget_has_no_deadline(session, monkeypatch):
+    """No --max-minutes means no deadline for any source."""
     seen = []
     pipeline = _cli(session, monkeypatch, [], lambda *a, deadline, **kw: seen.append(
         (a[1], deadline)) or {})
@@ -942,6 +945,7 @@ def test_main_without_a_budget_has_no_deadline(session, monkeypatch):
 
 
 def test_main_stops_a_source_whose_time_is_up(session, monkeypatch, capsys):
+    """A source that runs out of time skips its remaining courses."""
     from app.models import User
     from app.pipeline import StageResult
 
@@ -964,6 +968,7 @@ def test_main_stops_a_source_whose_time_is_up(session, monkeypatch, capsys):
 
 
 def test_main_stops_cleanly_on_sigterm(session, monkeypatch, capsys):
+    """SIGTERM raises Shutdown, exits 143, and a second signal is ignored."""
     import signal
 
     from app.jobs import Shutdown

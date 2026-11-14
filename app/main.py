@@ -56,7 +56,11 @@ from app.models import (
     User,
 )
 from app.moodle import browser_url
-from app.security import RateLimitMiddleware, SecurityHeadersMiddleware
+from app.security import (
+    ForwardedForMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from app.stats import compute_stats
 
 log = logging.getLogger("uvicorn.error")  # uvicorn configures this one
@@ -97,8 +101,9 @@ def error_page(request: Request, status_code: int, headers: dict | None = None):
         return PlainTextResponse(title, status_code=status_code, headers=headers)
 
 
-# Middleware added last runs first: sessions, then security headers (so the
-# limiter's 429 and the 500 page carry them), then the rate limiter.
+# Middleware added last runs first: the client address, sessions, then
+# security headers (so the limiter's 429 and the 500 page carry them), then
+# the rate limiter.
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     SecurityHeadersMiddleware, error_response=lambda request: error_page(request, 500))
@@ -109,6 +114,8 @@ app.add_middleware(
     https_only=settings.session_secure_cookie,
     max_age=settings.session_max_age,
 )
+# outermost: everything inside, the limiter included, sees the real client
+app.add_middleware(ForwardedForMiddleware)
 static_dir = Path(__file__).parent.parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

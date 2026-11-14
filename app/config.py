@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     healthcheck_ping_url: str = ""
     job_retention_days: int = 30  # finished (completed/failed) jobs older than this are pruned
     timezone: str = "Africa/Nairobi"  # IANA zone whose midnight starts a study day
+    # X-Forwarded-For entries appended by proxies we trust; the client is the
+    # one this many from the right (unset: 1 on Cloud Run, else 0 = leave it
+    # to uvicorn's --forwarded-allow-ips). See app.security.forwarded_client.
+    trusted_proxy_hops: int | None = None
+
+    @property
+    def proxy_hops(self) -> int:
+        if self.trusted_proxy_hops is not None:
+            return max(0, self.trusted_proxy_hops)
+        return 1 if os.environ.get("K_SERVICE") else 0
 
     @property
     def tz(self) -> ZoneInfo:

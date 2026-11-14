@@ -143,7 +143,10 @@ def pending_resource_ids(session: Session, course_id=None, source=None) -> list:
 
 def chunkable_resource_ids(session: Session, course_id=None, source=None) -> list:
     # ids only: loading every extracted_text up front is what blew memory
-    """Ids of extracted resources ready to chunk. Ids only: loading every extracted_text up front is what exhausted memory."""
+    """Ids of extracted resources ready to chunk.
+
+    Ids only: loading every extracted_text up front is what exhausted memory.
+    """
     q = (select(Resource.id)
          .where(Resource.extracted_text.is_not(None),
                 Resource.status.not_in(["failed", "skipped"]), _due())
@@ -251,7 +254,10 @@ def _save_db_failure(session: Session, rid, seen_hash, e: Exception) -> Resource
 def run_extraction(session: Session, downloader, course_id=None,
                    downloader_for=None, source=None,
                    deadline: float | None = None) -> StageResult:
-    """Download and extract pending resources. Stops between items once `deadline` (a time.monotonic() value) passes, and reports out_of_time."""
+    """Download and extract pending resources.
+
+    Stops between items once `deadline` (a time.monotonic() value) passes, and reports out_of_time.
+    """
     result = StageResult(Counter(extracted=0, skipped=0, failed=0))
     counts = result.counts
     ids = pending_resource_ids(session, course_id, source)
@@ -460,7 +466,10 @@ def _quiz_failed(session: Session, chunk_id, attempt: int, e: Exception) -> int:
 
 def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
              pace: float = 0.0, source=None, deadline: float | None = None) -> StageResult:
-    """Generate quiz items for chunks not yet covered. Stops between items once `deadline` passes."""
+    """Generate quiz items for chunks not yet covered.
+
+    Stops between items once `deadline` passes.
+    """
     from uuid import UUID
 
     from app.notify import course_of_chunk, enqueue_new_material
@@ -704,7 +713,11 @@ def _stop_on_signal(signum, frame) -> None:
 
 
 def main() -> None:
-    """CLI entry point: parse flags, share any --max-minutes budget across sources, and run each source under its lock. SIGTERM stops the run cleanly with exit 143."""
+    """CLI entry point.
+
+    Parses flags, shares any --max-minutes budget across sources, and runs each source under
+    its lock. SIGTERM stops the run cleanly with exit 143.
+    """
     import signal
 
     from app.jobs import Shutdown

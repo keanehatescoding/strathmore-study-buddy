@@ -69,6 +69,24 @@ class OutstandingGrant(SQLModel, table=True):
     )
 
 
+class LoginAttempt(SQLModel, table=True):
+    """One counted password attempt (app.throttle). In the database, not in
+    process memory, so every web instance shares the count and a restart or
+    scale-to-zero doesn't reset it. `key` is a hash: no usernames kept."""
+
+    __tablename__ = "login_attempts"
+    __table_args__ = (
+        Index("ix_login_attempts_key_at", "key", "attempted_at"),
+        Index("ix_login_attempts_at", "attempted_at"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    key: str
+    attempted_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
 class Course(SQLModel, table=True):
     __tablename__ = "courses"
     __table_args__ = (
@@ -117,6 +135,44 @@ class Resource(SQLModel, table=True):
     # may run, so a dead download or a failing LLM call isn't redone every run
     attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     retry_after: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    # resumable chunking checkpoint: {"next_section": int, "chunks": [chunk dicts]}
+    # for a resource that exceeded a run's time budget. Not final until all
+    # sections succeed, so these chunks are not stored in `chunks` yet.
+    chunk_checkpoint: Optional[Any] = Field(default=None, sa_column=Column(JSON))
+
+    @property
+    def section_checkpoint(self):
+        return self.chunk_checkpoint
+
+    @property
+    def chunks_checkpoint(self):
+        return self.chunk_checkpoint
+
+    @property
+    def chunk_progress(self):
+        return self.chunk_checkpoint
+
+    @property
+    def chunk_resume_from(self) -> int:
+        cp = self.chunk_checkpoint
+        if isinstance(cp, dict):
+            return int(cp.get("next_section", 0) or 0)
+        return 0
+
+    @property
+    def chunked_sections(self) -> int:
+        return self.chunk_resume_from
+
+    @property
+    def sections_done(self) -> int:
+        return self.chunk_resume_from
+
+    @property
+    def chunked_chunks(self) -> list:
+        cp = self.chunk_checkpoint
+        if isinstance(cp, dict):
+            return list(cp.get("chunks") or [])
+        return []
 
 
 class Assignment(SQLModel, table=True):

@@ -208,6 +208,10 @@ def _purge_derived(session: Session, resource_id) -> None:
     session.exec(delete(QuizAttempt).where(QuizAttempt.chunk_id.in_(chunk_ids)))
     session.exec(delete(QuizFailure).where(QuizFailure.chunk_id.in_(chunk_ids)))
     session.exec(delete(Chunk).where(Chunk.resource_id == resource_id))
+    r = session.get(Resource, resource_id)
+    if r is not None:
+        r.chunk_checkpoint = None
+        session.add(r)
 
 
 class ContentChanged(Exception):
@@ -439,6 +443,7 @@ def sync_course(
                     setattr(existing, k, v)
                 existing.attempts = 0  # new content: no backoff carried over
                 existing.retry_after = None
+                existing.chunk_checkpoint = None
                 session.add(existing)
                 session.commit()
                 stats.resources_updated += 1
@@ -456,6 +461,7 @@ def sync_course(
                     existing.extracted_text = r.text
                     existing.error = with_text_cap_note(existing.error, cap_note)
                     _relocate_chunks(session, existing.id, r.text)
+                    existing.chunk_checkpoint = None
                 for k, v in meta.items():
                     setattr(existing, k, v)
                 session.add(existing)

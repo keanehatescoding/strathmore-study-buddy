@@ -1,7 +1,6 @@
 import hmac
 import logging
 import secrets
-import time
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +56,11 @@ from app.models import (
     User,
 )
 from app.moodle import browser_url
-from app.security import RateLimitMiddleware, SecurityHeadersMiddleware, hit_table
+from app.security import (
+    ForwardedForMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from app.stats import compute_stats
 
 log = logging.getLogger("uvicorn.error")  # uvicorn configures this one
@@ -98,8 +101,9 @@ def error_page(request: Request, status_code: int, headers: dict | None = None):
         return PlainTextResponse(title, status_code=status_code, headers=headers)
 
 
-# Middleware added last runs first: sessions, then security headers (so the
-# limiter's 429 and the 500 page carry them), then the rate limiter.
+# Middleware added last runs first: the client address, sessions, then
+# security headers (so the limiter's 429 and the 500 page carry them), then
+# the rate limiter.
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     SecurityHeadersMiddleware, error_response=lambda request: error_page(request, 500))
@@ -110,6 +114,8 @@ app.add_middleware(
     https_only=settings.session_secure_cookie,
     max_age=settings.session_max_age,
 )
+# outermost: everything inside, the limiter included, sees the real client
+app.add_middleware(ForwardedForMiddleware)
 static_dir = Path(__file__).parent.parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -978,20 +984,21 @@ async def _connect_and_redirect(request, session, user, get_token) -> RedirectRe
 MOODLE_LOGIN_LIMIT = (5, 15 * 60)  # attempts per window, per account and per username
 
 
-def _moodle_login_wait(request: Request, user: User, username: str) -> float | None:
-    """Seconds to wait before another Moodle password attempt, else None.
+def _moodle_login_wait(request: Request, session: Session, user: User,
+                       username: str) -> float | None:
+    """Seconds to wait before another Moodle password attempt, else None
+    (and the attempt is counted).
 
     The form checks passwords against Moodle, so the global POST budget alone
     would let one account guess another student's password 120 times a
     minute. Limit by our account (one user trying many usernames) and by the
-    Moodle username (many accounts trying one username)."""
+    Moodle username (many accounts trying one username). Counted in the
+    database (app.throttle), so every web instance shares the limit."""
+    from app.throttle import attempt
+
     limit, window = getattr(request.app.state, "moodle_login_limit", MOODLE_LOGIN_LIMIT)
-    table = hit_table(request.app, "moodle_login_hits")
-    now = time.monotonic()
-    waits = [table.hit(key, limit, window, now)
-             for key in (f"user:{user.id}", f"moodle:{username.lower()}")]
-    waits = [w for w in waits if w is not None]
-    return max(waits) if waits else None
+    return attempt(session, (f"user:{user.id}", f"moodle:{username.lower()}"),
+                   limit, window)
 
 
 @app.post("/settings/moodle/login")
@@ -1008,7 +1015,7 @@ async def moodle_login(
     if not username or not password:
         _flash(request, "error", "Enter your Moodle username and password.")
         return RedirectResponse("/settings/moodle", status_code=303)
-    wait = _moodle_login_wait(request, user, username)
+    wait = await run_in_threadpool(_moodle_login_wait, request, session, user, username)
     if wait is not None:
         _flash(request, "error", "Too many Moodle sign-in attempts. Try again in "
                f"{int(wait // 60) + 1} minute(s), or paste your key below instead.")

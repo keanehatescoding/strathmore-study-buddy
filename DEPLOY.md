@@ -45,6 +45,11 @@ from it with different commands.
    | `study-buddy-sync` | `alembic upgrade head && python -m app.sync_cli --source moodle --all-users --enqueue && python -m app.sync_cli --source classroom --all-users --enqueue && exec python -m app.worker` | `0 3 * * *` | 2 h |
    | `study-buddy-pipeline` | `alembic upgrade head && exec python -m app.pipeline --source moodle --source classroom --pace 45 --max-minutes 660` | `0 6 * * *` | 12 h |
 
+   Note: changing a job's command above does not reach the deployed job via
+   cloudbuild.yaml (it only updates images). Apply it once with
+   `gcloud run jobs update <job> --region=... --command='sh','-c','<command>'`
+   (or recreate the job) before relying on the new flag.
+
    Cloud Run has no always-on worker, so `study-buddy-worker` is a single
    pass every 5 minutes instead of `--loop 60`: a sync queued at sign-in
    or by "Sync now", and a new user's first pipeline run (see below), start
@@ -59,7 +64,12 @@ from it with different commands.
    runs a notification pass, so the nightly sync's new material goes out
    right away. Events are marked once sent, so the extra pass never emails
    anyone twice. The pipeline gets its own slot after the sync, since paced
-   LLM runs take hours and the free Gemini tier rate-limits hard.
+   LLM runs take hours and the free Gemini tier rate-limits hard. The
+   job's budget (`--max-minutes 660`) is shared by both sources, so Moodle
+   cannot starve Classroom and the run stops cleanly between items with
+   `out_of_time` well before the 12 h task timeout; the next day's run resumes. `--pace` overrides
+   `LLM_PACE` for these commands, so setting `LLM_PACE` on the pipeline job
+   itself has no effect (the worker job still needs it for first-run jobs).
 
    Long-running steps are `exec`'d: until then `sh` is PID 1, which ignores
    the SIGTERM Cloud Run sends on a timeout or cancel, so the step would be
@@ -197,19 +207,39 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
 
 - Rate limiting is per-process memory (120 POSTs/min default), keyed by
   signed-in user and by client IP for anonymous requests, with at most
-  10,000 clients tracked (least recently seen evicted). Behind multiple
-  uvicorn workers put a shared limiter or a proxy limit in front.
-- Client IPs come from `X-Forwarded-For`, trusted from the peers listed in
-  `FORWARDED_ALLOW_IPS` (Dockerfile/Procfile default `*`: any peer). Uvicorn
-  takes the leftmost address that isn't a trusted proxy — with `*` that is
-  the leftmost entry, which a client can forge unless the proxy **replaces**
-  any incoming `X-Forwarded-For` rather than appending to it. So: only let
-  the proxy reach uvicorn (never publish the port directly), make the proxy
-  overwrite the header (nginx: `proxy_set_header X-Forwarded-For
-  $remote_addr;`, not `$proxy_add_x_forwarded_for`), and where the proxy's
-  address is known set `FORWARDED_ALLOW_IPS` to it (IPs or CIDRs,
-  comma-separated). A forged address only affects the anonymous POST budget
-  and logs — signed-in users are rate-limited by account.
+  10,000 clients tracked (least recently seen evicted), so on Cloud Run each
+  instance has its own budget and a cold start resets it: it is a coarse
+  abuse guard only. Moodle password attempts (5 per 15 min, per account and
+  per Moodle username) are counted in Postgres (`login_attempts`, hashed
+  keys) instead, so every instance shares that limit and restarts don't
+  reset it.
+- Client IPs come from `X-Forwarded-For`. Proxies **append** to it, so
+  only the entries our own proxies added can be trusted; everything to their
+  left is whatever the client sent. `TRUSTED_PROXY_HOPS` says how many there
+  are: the client is that many entries from the right.
+  - **Cloud Run** appends the address it saw, so the default there (when
+    `K_SERVICE` is set) is `1`. To check, send a forged header and read the
+    service's access log, e.g. `curl -H 'X-Forwarded-For: 203.0.113.77'
+    <url>/health`: the log line must show your real address, not
+    203.0.113.77. If it shows a Google address instead (a load balancer in
+    front adds its own entry), set `TRUSTED_PROXY_HOPS=2`.
+  - **Elsewhere** it defaults to `0`, which leaves it to uvicorn's
+    `--forwarded-allow-ips` (`FORWARDED_ALLOW_IPS`, Dockerfile/Procfile
+    default `*`: any peer). With `*` uvicorn takes the leftmost entry, which
+    a client can forge unless the proxy **replaces** any incoming header
+    (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`, not
+    `$proxy_add_x_forwarded_for`); or set `TRUSTED_PROXY_HOPS=1` behind one
+    appending proxy. Either way, only let the proxy reach uvicorn.
+  - **Every ingress path must pass through that proxy chain.** Cloud Run's
+    `run.app` URL, if reachable directly, bypasses the load balancer and
+    lets a client supply the trusted entry, so with `TRUSTED_PROXY_HOPS=2`
+    the address it picks is spoofable. Put the service behind the chain
+    only (e.g. ingress `internal-and-cloud-load-balancing`, or block the
+    direct URL), and block any other path that reaches the service.
+  - A request whose `X-Forwarded-For` has no usable trusted entry is keyed
+    as `unresolved` (one shared bucket), not by the address uvicorn chose.
+  A forged address only affects the anonymous POST budget and logs:
+  signed-in users are rate-limited by account.
 - CSP: scripts and `<style>` elements need the per-response nonce
   (`{{ request.state.csp_nonce }}` in templates); no `unsafe-inline`.
   `style="…"` attributes are blocked — add a class to `static/css/app.css`.
@@ -256,7 +286,9 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
   Neither touches `ALLOWED_EMAILS`: signing in again starts an empty account.
 - Moodle password sign-in (`/settings/moodle`) is limited to 5 attempts per
   15 minutes per account and per Moodle username, so it can't be used to
-  guess another student's password. Like the POST limit, it is per-process.
+  guess another student's password. The count is stored in Postgres
+  (`login_attempts`), so every instance shares it (see the rate-limiting
+  note above).
 - Cron observability: set `HEALTHCHECK_PING_URL` (e.g. a healthchecks.io
   check) — the worker pings it after every pass (every minute with
   `--loop 60`) and every 5 minutes while a long pass is still draining a

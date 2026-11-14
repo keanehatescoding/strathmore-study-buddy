@@ -176,3 +176,95 @@ def test_api_errors_stay_json(testapp):
 def test_405_keeps_its_allow_header(testapp):
     r = testapp["client"].put("/login")
     assert r.status_code == 405 and "GET" in r.headers["allow"]
+
+
+# --- client address from X-Forwarded-For (#148) ---
+
+def _xff(*values):
+    return [(b"x-forwarded-for", v.encode()) for v in values]
+
+
+def test_forwarded_client_trusts_only_the_appended_entries():
+    from app.security import forwarded_client
+
+    # Cloud Run appends what it saw: what the client sent stays on the left
+    assert forwarded_client(_xff("203.0.113.77, 41.90.172.27"), 1) == "41.90.172.27"
+    assert forwarded_client(_xff("203.0.113.77, 41.90.172.27, 35.191.0.1"), 2) == "41.90.172.27"
+    assert forwarded_client(_xff("203.0.113.77", "41.90.172.27"), 1) == "41.90.172.27"
+    assert forwarded_client(_xff("2001:db8::1"), 1) == "2001:db8::1"
+    # fewer entries than trusted hops: the leftmost is the best there is
+    assert forwarded_client(_xff("41.90.172.27"), 2) == "41.90.172.27"
+    # nothing to go on, or turned off: keep the connection's address
+    assert forwarded_client([], 1) is None
+    assert forwarded_client(_xff(" , "), 1) is None
+    assert forwarded_client(_xff("not-an-ip"), 1) is None
+    assert forwarded_client(_xff("203.0.113.77, 41.90.172.27"), 0) is None
+
+
+def test_proxy_hops_default_to_one_on_cloud_run(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    assert Settings().proxy_hops == 0  # local/nginx: uvicorn's --forwarded-allow-ips
+    monkeypatch.setenv("K_SERVICE", "strathmore-study-buddy-git")
+    monkeypatch.setenv("SECRET_KEY", "x" * 64)  # K_SERVICE counts as production
+    assert Settings().proxy_hops == 1
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
+    assert Settings().proxy_hops == 2
+
+
+def test_forged_forwarded_for_does_not_buy_a_new_budget(testapp, monkeypatch):
+    from app.config import settings
+
+    client = testapp["client"]
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    hit_table(app).clear()
+    app.state.rate_limit = (2, 60)
+    try:
+        codes = [client.post("/logout", headers={
+            "X-Forwarded-For": f"198.51.100.{n}, 41.90.172.27"}).status_code
+            for n in range(3)]
+        assert codes[-1] == 429  # a new forged address each time, one real client
+        # someone else, behind the same proxy, still has their own budget
+        assert client.post("/logout", headers={
+            "X-Forwarded-For": "41.90.172.28"}).status_code != 429
+        assert "ip:41.90.172.27" in hit_table(app)._hits
+    finally:
+        del app.state.rate_limit
+        hit_table(app).clear()
+
+
+def test_an_unusable_trusted_entry_does_not_keep_uvicorns_forged_client(monkeypatch):
+    """uvicorn (--forwarded-allow-ips *) has already set scope["client"] to the
+    leftmost, client-supplied entry. When the trusted entry can't be parsed,
+    that forged address must not be the rate-limit key."""
+    import asyncio
+
+    from app.config import settings
+    from app.security import UNRESOLVED_CLIENT, ForwardedForMiddleware
+
+    seen = {}
+
+    async def app(scope, receive, send):
+        seen["client"] = scope["client"]
+
+    async def run(hops, headers, client):
+        monkeypatch.setattr(settings, "trusted_proxy_hops", hops)
+        scope = {"type": "http", "headers": headers, "client": client}
+        await ForwardedForMiddleware(app)(scope, None, None)
+        return seen["client"]
+
+    # uvicorn kept the forged leftmost entry as the client; the trusted hop
+    # carries a port, which is not a bare address
+    forged = ("203.0.113.77", 5555)
+    assert asyncio.run(run(1, _xff("203.0.113.77, 41.90.172.27:8080"), forged)) \
+        == (UNRESOLVED_CLIENT, 0)
+    # a usable trusted entry still wins
+    assert asyncio.run(run(1, _xff("203.0.113.77, 41.90.172.27"), forged)) \
+        == ("41.90.172.27", 5555)
+    # no forwarded header: uvicorn's (peer) address is left alone
+    assert asyncio.run(run(1, [], ("35.191.0.9", 443))) == ("35.191.0.9", 443)
+    # zero-hop mode leaves everything to uvicorn, as before
+    assert asyncio.run(run(0, _xff("203.0.113.77, 41.90.172.27:8080"), forged)) \
+        == forged

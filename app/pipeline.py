@@ -2,7 +2,9 @@
 
 Usage: python -m app.pipeline --source moodle [--source classroom] [--course ID]
        [--extract-only] [--chunk-only] [--quiz-only] [--pace S] [--max-minutes M]
-Chunking needs LLM_* in .env; extraction runs without it.
+Chunking needs LLM_* in .env; extraction runs without it. --max-minutes
+stops between items (reporting out_of_time) so a scheduled run ends before
+the platform's task timeout instead of being killed mid-item.
 
 A resource whose download or chunking fails is deferred with exponential
 backoff (Resource.attempts / retry_after, 1h doubling to 24h) rather than
@@ -28,7 +30,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlmodel import Session, delete, func, or_, select
 
-from app.chunk import FAILED_JOIN, chunk_resource, needs_llm, text_cap_note
+from app.chunk import (
+    FAILED_JOIN,
+    ChunkingDeadline,
+    chunk_resource,
+    needs_llm,
+    text_cap_note,
+)
 from app.config import settings
 from app.db import engine
 from app.drive import DriveError
@@ -362,7 +370,13 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             counts["needs_llm"] += 1  # left untouched for a run with LLM_* set
             continue
         try:
-            n = chunk_resource(session, r, llm)
+            n = chunk_resource(session, r, llm, deadline=deadline)
+        except ChunkingDeadline:
+            # nothing was stored: the resource is still chunkable next run
+            session.rollback()
+            result.out_of_time = True
+            print("  out of time, stopping run (resumable)", flush=True)
+            break
         except QuotaExhaustedError as e:
             print(f"  quota exhausted, stopping run (resumable): {str(e)[:120]}",
                   flush=True)
@@ -530,11 +544,13 @@ def _lock_key(name: str) -> int:
 
 
 @contextmanager
-def advisory_lock(name: str, bind=None, wait: bool = False):
+def advisory_lock(name: str, bind=None, wait: bool = False,
+                 deadline: float | None = None):
     """Yield whether this process holds the lock `name`. A session-level
     Postgres advisory lock, so it goes away with the process even if it
     dies; SQLite has no concurrent runs to guard against and always gets
-    it. `wait` blocks until the lock is free instead of giving up."""
+    it. `wait` blocks until the lock is free instead of giving up. When
+    `deadline` is given, waiting is bounded by it."""
     bind = bind or engine
     if bind.dialect.name != "postgresql":
         yield True
@@ -542,25 +558,36 @@ def advisory_lock(name: str, bind=None, wait: bool = False):
     with bind.connect() as conn:
         key = _lock_key(name)
         if wait:
-            conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": key})
-            got = True
+            got = False
+            while True:
+                got = conn.execute(text("SELECT pg_try_advisory_lock(:k)"),
+                                   {"k": key}).scalar()
+                if got:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                time.sleep(1)
+                conn.rollback()
+            conn.commit() if got else None
         else:
             got = conn.execute(text("SELECT pg_try_advisory_lock(:k)"),
                                {"k": key}).scalar()
-        conn.commit()
+        if got:
+            conn.commit()
         try:
-            yield got
+            yield bool(got)
         finally:
-            if got:  # pooled connections outlive this: release explicitly
+            if got:
                 conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
                 conn.commit()
 
 
-def single_run(source: str, bind=None, wait: bool = False):
+def single_run(source: str, bind=None, wait: bool = False,
+               deadline: float | None = None):
     """Yield whether this process holds the run for `source`: two runs over
     the same resources (overlapping cron, a backfill by hand) would both chunk
     and quiz them, duplicating chunks. See advisory_lock."""
-    return advisory_lock(f"app.pipeline:{source}", bind, wait)
+    return advisory_lock(f"app.pipeline:{source}", bind, wait, deadline=deadline)
 
 
 STAGES = ("extraction", "chunking", "quiz")
@@ -617,8 +644,12 @@ def _run_source(source: str, course: str | None, chunk_llm, quiz_llm, pace: floa
                 stages, deadline: float | None) -> None:
     """One source's run under its single_run lock (see main)."""
     for wait in (False, True):
-        with single_run(source, wait=wait) as got, Session(engine) as session:
+        with single_run(source, wait=wait, deadline=deadline) as got, \
+                Session(engine) as session:
             if not got:
+                if deadline is not None and time.monotonic() >= deadline:
+                    print("out_of_time: stopped waiting for lock", flush=True)
+                    return
                 if pipeline_job_running(session, source):
                     # a new user's first run (app.jobs): short, so wait it out
                     # rather than skip everyone else's day

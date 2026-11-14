@@ -25,6 +25,7 @@ import hashlib
 from sqlmodel import Session, select
 
 from app.extract import CAPPED_PREFIX, is_cap_note
+from app.jobs import Shutdown
 from app.llm import LLMClient, TruncatedError
 from app.llm_schemas import ChunkReply
 from app.models import Chunk
@@ -165,22 +166,27 @@ def chunk_sections(sections: list[str], llm: LLMClient,
         current_i = idx
         current_chunks = list(resume_state.get("partial") or [])
         next_section = idx
+    def _in_flight(unsent_now: list[str] | None = None) -> dict | None:
+        """The section being split, for a checkpoint: its finished halves and
+        its unsent ones, next one first. unsent_now: a section already taken
+        off todo for a call that a stop interrupted."""
+        if current_i is None:
+            return None
+        return {
+            "index": current_i,
+            "partial": current_chunks,
+            "pending": list(unsent_now or [])
+            + [s for j, s in reversed(todo) if j == current_i],
+        }
+
     while todo:
         if calls >= max_calls:
             # cap stop is final: keep whatever is in flight too
             return out + current_chunks, len({i for i, _ in todo})
         if deadline is not None and time.monotonic() >= deadline:
-            in_flight = None
-            if current_i is not None:
-                in_flight = {
-                    "index": current_i,
-                    "partial": current_chunks,
-                    # unsent halves of this section, next one first
-                    "pending": [s for i, s in reversed(todo) if i == current_i],
-                }
             raise ChunkingDeadline(
                 "time budget exhausted", completed=out, resume_from=next_section,
-                calls=calls, in_flight=in_flight)
+                calls=calls, in_flight=_in_flight())
         i, section = todo.pop()
         # a new original section starts: the previous one is complete
         if current_i is not None and i != current_i:
@@ -191,22 +197,30 @@ def chunk_sections(sections: list[str], llm: LLMClient,
         next_section = i
         calls += 1
         try:
-            data = llm.complete_json(
-                SYSTEM,
-                f"Split the following study material (part {i + 1}/{len(sections)}):"
-                f"\n\n{section}",
-                required_key="chunks",
-            )
-        except TruncatedError:
-            if len(section) < MIN_SPLIT_CHARS:
-                raise
-            # the reply outgrew the output limit: two halves fit
-            halves = presplit(section, len(section) // 2 + 1)
-            todo.extend((i, h) for h in reversed(halves))
-            # section stays in flight until all of its halves are done
-            continue
-        chunks = [c.model_dump() for c in ChunkReply.model_validate(data).chunks]
-        current_chunks.extend(chunks)
+            try:
+                data = llm.complete_json(
+                    SYSTEM,
+                    f"Split the following study material (part {i + 1}/{len(sections)}):"
+                    f"\n\n{section}",
+                    required_key="chunks",
+                )
+            except TruncatedError:
+                if len(section) < MIN_SPLIT_CHARS:
+                    raise
+                # the reply outgrew the output limit: two halves fit
+                halves = presplit(section, len(section) // 2 + 1)
+                todo.extend((i, h) for h in reversed(halves))
+                # section stays in flight until all of its halves are done
+                continue
+            chunks = [c.model_dump() for c in ChunkReply.model_validate(data).chunks]
+            current_chunks.extend(chunks)
+        except Shutdown as e:
+            # a SIGTERM mid-call: this section was taken off todo, so it is
+            # unsent and must come back first on resume. chunk_resource saves it.
+            e.checkpoint = ChunkingDeadline(
+                "stopped", completed=out, resume_from=next_section, calls=calls,
+                in_flight=_in_flight([section]))
+            raise
         # if nothing with the same index remains, this section is complete
         if not any(x[0] == i for x in todo):
             out.extend(current_chunks)
@@ -248,6 +262,17 @@ def with_text_cap_note(error: str | None, note: str | None) -> str | None:
 
 def needs_llm(resource) -> bool:
     return len(resource.extracted_text or "") >= MIN_LLM_CHARS
+
+
+def _checkpoint(stop: ChunkingDeadline, text_id: str, completed_chunks: list) -> dict:
+    """The resumable checkpoint for a stop: sections done so far, not final chunks."""
+    return {
+        "text_id": text_id,
+        "next_section": int(stop.resume_from),
+        "chunks": completed_chunks + list(stop.completed),
+        "calls": int(stop.calls),
+        "in_flight": stop.in_flight,
+    }
 
 
 def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
@@ -302,17 +327,19 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
         except ChunkingDeadline as e:
             # preserve the sections done so far as a resumable checkpoint,
             # without storing (or marking) them as final chunks
-            ckpt_chunks = completed_chunks + list(e.completed)
-            resource.chunk_checkpoint = {
-                "text_id": text_id,
-                "next_section": int(e.resume_from),
-                "chunks": ckpt_chunks,
-                "calls": int(e.calls),
-                "in_flight": e.in_flight,
-            }
+            resource.chunk_checkpoint = _checkpoint(e, text_id, completed_chunks)
             session.add(resource)
             if not commit_if_current(session, resource.id, seen_hash, seen_text=text):
                 raise ContentChanged(resource.id) from e
+            raise
+        except Shutdown as e:
+            # SIGTERM (a Cloud Run timeout, a redeploy): keep the finished
+            # sections for the next run. The stop itself still goes through.
+            stop = getattr(e, "checkpoint", None)
+            if stop is not None:
+                resource.chunk_checkpoint = _checkpoint(stop, text_id, completed_chunks)
+                session.add(resource)
+                commit_if_current(session, resource.id, seen_hash, seen_text=text)
             raise
         items = completed_chunks + new_chunks
         if left:

@@ -1738,3 +1738,69 @@ def test_an_interrupted_split_resumes_without_repeating_calls(session, monkeypat
     assert runs > 1  # the deadline really interrupted the split
     assert stored == len(expected)
     assert len(llm.sizes) == len(fresh.sizes)  # no call was repeated
+
+
+def test_a_stop_mid_call_checkpoints_the_unsent_section():
+    """SIGTERM during a call keeps the finished sections, and the interrupted
+    section is sent again on resume: nothing finished is repeated or lost."""
+    from app.chunk import chunk_sections
+    from app.jobs import Shutdown
+
+    sections = ["a", "b", "c"]
+
+    class StopOnSecondCall:
+        calls = 0
+
+        def complete_json(self, system, user, **kw):
+            self.calls += 1
+            if self.calls == 2:
+                raise Shutdown("SIGTERM")
+            return {"chunks": [{"title": "T", "content": user.split("\n\n", 1)[1]}]}
+
+    with pytest.raises(Shutdown) as info:
+        chunk_sections(sections, StopOnSecondCall())
+    stop = info.value.checkpoint
+    assert [c["content"] for c in stop.completed] == ["a"]
+    assert stop.resume_from == 1
+    assert stop.in_flight == {"index": 1, "partial": [], "pending": ["b"]}
+
+    resumed = []
+
+    class Count:
+        def complete_json(self, system, user, **kw):
+            resumed.append(user.split("\n\n", 1)[1])
+            return {"chunks": [{"title": "T", "content": resumed[-1]}]}
+
+    chunks, _ = chunk_sections(sections, Count(), resume_from=stop.resume_from,
+                               calls_before=stop.calls, resume_state=stop.in_flight)
+    assert resumed == ["b", "c"]
+    assert [c["content"] for c in stop.completed + chunks] == ["a", "b", "c"]
+
+
+def test_a_sigterm_during_a_split_keeps_the_checkpoint(session):
+    """chunk_resource saves the checkpoint for a SIGTERM stop as it does for a
+    deadline stop, so the next run resumes rather than starting over."""
+    from app.chunk import chunk_resource, chunk_sections
+    from app.jobs import Shutdown
+
+    text = ("word " * 1600).strip()  # one section, halved until it fits
+    expected, _ = chunk_sections([text], TruncatingLLM(1500))
+
+    class StopOnSecondCall(TruncatingLLM):
+        armed = True
+
+        def complete_json(self, system, user, **kw):
+            if self.armed and len(self.sizes) == 1:
+                self.armed = False
+                self.sizes.append(len(user))
+                raise Shutdown("SIGTERM")
+            return super().complete_json(system, user, **kw)
+
+    llm = StopOnSecondCall(1500)
+    r = _resource(session, status="extracted", extracted_text=text)
+    with pytest.raises(Shutdown):
+        chunk_resource(session, r, llm)
+    assert r.chunk_checkpoint is not None
+    assert r.chunk_checkpoint["in_flight"]["pending"]  # the unsent half is kept
+
+    assert chunk_resource(session, r, llm) == len(expected)

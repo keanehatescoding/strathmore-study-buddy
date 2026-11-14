@@ -233,3 +233,38 @@ def test_forged_forwarded_for_does_not_buy_a_new_budget(testapp, monkeypatch):
     finally:
         del app.state.rate_limit
         hit_table(app).clear()
+
+
+def test_an_unusable_trusted_entry_does_not_keep_uvicorns_forged_client(monkeypatch):
+    """uvicorn (--forwarded-allow-ips *) has already set scope["client"] to the
+    leftmost, client-supplied entry. When the trusted entry can't be parsed,
+    that forged address must not be the rate-limit key."""
+    import asyncio
+
+    from app.config import settings
+    from app.security import UNRESOLVED_CLIENT, ForwardedForMiddleware
+
+    seen = {}
+
+    async def app(scope, receive, send):
+        seen["client"] = scope["client"]
+
+    async def run(hops, headers, client):
+        monkeypatch.setattr(settings, "trusted_proxy_hops", hops)
+        scope = {"type": "http", "headers": headers, "client": client}
+        await ForwardedForMiddleware(app)(scope, None, None)
+        return seen["client"]
+
+    # uvicorn kept the forged leftmost entry as the client; the trusted hop
+    # carries a port, which is not a bare address
+    forged = ("203.0.113.77", 5555)
+    assert asyncio.run(run(1, _xff("203.0.113.77, 41.90.172.27:8080"), forged)) \
+        == (UNRESOLVED_CLIENT, 0)
+    # a usable trusted entry still wins
+    assert asyncio.run(run(1, _xff("203.0.113.77, 41.90.172.27"), forged)) \
+        == ("41.90.172.27", 5555)
+    # no forwarded header: uvicorn's (peer) address is left alone
+    assert asyncio.run(run(1, [], ("35.191.0.9", 443))) == ("35.191.0.9", 443)
+    # zero-hop mode leaves everything to uvicorn, as before
+    assert asyncio.run(run(0, _xff("203.0.113.77, 41.90.172.27:8080"), forged)) \
+        == forged

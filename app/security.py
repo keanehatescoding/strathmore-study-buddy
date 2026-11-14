@@ -98,6 +98,10 @@ def forwarded_client(headers, hops: int) -> str | None:
         return None
 
 
+# client address for requests whose X-Forwarded-For has no usable trusted entry
+UNRESOLVED_CLIENT = "unresolved"
+
+
 class ForwardedForMiddleware:
     """Set the request's client address from X-Forwarded-For per
     settings.proxy_hops. Edits the ASGI scope in place, so uvicorn's access
@@ -108,10 +112,18 @@ class ForwardedForMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
-            host = forwarded_client(scope.get("headers") or [], settings.proxy_hops)
+            headers = scope.get("headers") or []
+            host = forwarded_client(headers, settings.proxy_hops)
             if host is not None:
                 port = scope["client"][1] if scope.get("client") else 0
                 scope["client"] = (host, port)
+            elif settings.proxy_hops > 0 and any(
+                name.lower() == b"x-forwarded-for" for name, _ in headers
+            ):
+                # uvicorn already took the leftmost (client-supplied) entry
+                # and the real peer is gone from the scope, so it can't be
+                # restored; key these requests on a fixed name instead
+                scope["client"] = (UNRESOLVED_CLIENT, 0)
         await self.app(scope, receive, send)
 
 

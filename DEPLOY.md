@@ -206,6 +206,14 @@ only renamed into place once `pg_dump` succeeds; the password is passed via
     (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`, not
     `$proxy_add_x_forwarded_for`); or set `TRUSTED_PROXY_HOPS=1` behind one
     appending proxy. Either way, only let the proxy reach uvicorn.
+  - **Every ingress path must pass through that proxy chain.** Cloud Run's
+    `run.app` URL, if reachable directly, bypasses the load balancer and
+    lets a client supply the trusted entry, so with `TRUSTED_PROXY_HOPS=2`
+    the address it picks is spoofable. Put the service behind the chain
+    only (e.g. ingress `internal-and-cloud-load-balancing`, or block the
+    direct URL), and block any other path that reaches the service.
+  - A request whose `X-Forwarded-For` has no usable trusted entry is keyed
+    as `unresolved` (one shared bucket), not by the address uvicorn chose.
   A forged address only affects the anonymous POST budget and logs:
   signed-in users are rate-limited by account.
 - CSP: scripts and `<style>` elements need the per-response nonce

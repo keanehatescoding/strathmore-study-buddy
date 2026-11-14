@@ -1804,3 +1804,43 @@ def test_a_sigterm_during_a_split_keeps_the_checkpoint(session):
     assert r.chunk_checkpoint["in_flight"]["pending"]  # the unsent half is kept
 
     assert chunk_resource(session, r, llm) == len(expected)
+
+
+def test_a_stop_in_a_resumed_split_keeps_every_unsent_half():
+    """A SIGTERM during a call for a half of a resumed split keeps that half
+    and the halves still queued: none is dropped, and the original section
+    is not added back to the checkpoint."""
+    from app.chunk import chunk_sections
+    from app.jobs import Shutdown
+
+    class StopAtOnce:
+        def complete_json(self, system, user, **kw):
+            raise Shutdown("SIGTERM")
+
+    state = {"index": 0, "partial": [], "pending": ["h1", "h2"]}
+    with pytest.raises(Shutdown) as info:
+        chunk_sections(["a"], StopAtOnce(), resume_state=state)
+    stop = info.value.checkpoint
+    assert stop.in_flight == {"index": 0, "partial": [], "pending": ["h1", "h2"]}
+
+
+def test_a_failed_checkpoint_commit_does_not_mask_the_shutdown(session, monkeypatch):
+    """If saving the checkpoint on SIGTERM fails, the Shutdown still propagates
+    (so the run stops) rather than the commit's error replacing it."""
+    import app.sync
+    from app.chunk import chunk_resource
+    from app.jobs import Shutdown
+
+    text = ("word " * 1600).strip()  # one section, halved until it fits
+
+    class StopOnFirstCall(TruncatingLLM):
+        def complete_json(self, system, user, **kw):
+            raise Shutdown("SIGTERM")
+
+    def broken_commit(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(app.sync, "commit_if_current", broken_commit)
+    r = _resource(session, status="extracted", extracted_text=text)
+    with pytest.raises(Shutdown):
+        chunk_resource(session, r, StopOnFirstCall(1500))

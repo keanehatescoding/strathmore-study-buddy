@@ -196,6 +196,9 @@ def chunk_sections(sections: list[str], llm: LLMClient,
         current_i = i
         next_section = i
         calls += 1
+        # what this call can change: kept chunks, or queued halves. A stop
+        # compares against these to know whether the section is still owed.
+        kept_before, queued_before = len(current_chunks), len(todo)
         try:
             try:
                 data = llm.complete_json(
@@ -209,17 +212,20 @@ def chunk_sections(sections: list[str], llm: LLMClient,
                     raise
                 # the reply outgrew the output limit: two halves fit
                 halves = presplit(section, len(section) // 2 + 1)
-                todo.extend((i, h) for h in reversed(halves))
+                # one extend of a built list: a stop sees all halves or none
+                todo.extend([(i, h) for h in reversed(halves)])
                 # section stays in flight until all of its halves are done
                 continue
             chunks = [c.model_dump() for c in ChunkReply.model_validate(data).chunks]
             current_chunks.extend(chunks)
         except Shutdown as e:
-            # a SIGTERM mid-call: this section was taken off todo, so it is
-            # unsent and must come back first on resume. chunk_resource saves it.
+            # a SIGTERM mid-call: the section is owed a call on resume only
+            # while neither its result nor its halves were kept. Otherwise the
+            # checkpoint would replay chunks, or split the section twice.
+            kept = len(current_chunks) != kept_before or len(todo) != queued_before
             e.checkpoint = ChunkingDeadline(
                 "stopped", completed=out, resume_from=next_section, calls=calls,
-                in_flight=_in_flight([section]))
+                in_flight=_in_flight([] if kept else [section]))
             raise
         # if nothing with the same index remains, this section is complete
         if not any(x[0] == i for x in todo):
@@ -339,7 +345,12 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
             if stop is not None:
                 resource.chunk_checkpoint = _checkpoint(stop, text_id, completed_chunks)
                 session.add(resource)
-                commit_if_current(session, resource.id, seen_hash, seen_text=text)
+                try:
+                    commit_if_current(session, resource.id, seen_hash, seen_text=text)
+                except Exception:
+                    # a failed checkpoint must not replace the Shutdown: the
+                    # bare raise below re-raises it, so the run still stops
+                    session.rollback()
             raise
         items = completed_chunks + new_chunks
         if left:

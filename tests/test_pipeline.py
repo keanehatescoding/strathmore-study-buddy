@@ -905,6 +905,92 @@ def test_main_waits_only_behind_a_pipeline_job(session, monkeypatch, capsys, job
         assert "in progress; exiting" in capsys.readouterr().out
 
 
+def _cli(session, monkeypatch, argv, run_course):
+    """Point the pipeline at the test DB, stub run_course, set argv, and return the module."""
+    import app.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "engine", session.get_bind())
+    monkeypatch.setattr(pipeline, "run_course", run_course)
+    monkeypatch.setattr("sys.argv", ["pipeline", *argv, "--extract-only"])
+    return pipeline
+
+
+def test_main_shares_the_time_budget_between_sources(session, monkeypatch):
+    # #149: a 12 h Cloud Run timeout used to kill the run, and Classroom
+    # only started once Moodle was done, so a Moodle backlog starved it
+    """Moodle's unused share of --max-minutes goes to Classroom."""
+    clock = [1000.0]
+    ran = []
+
+    def run_course(s, source, cid, c, q, pace, stages, deadline):
+        ran.append((source, deadline - clock[0]))
+        clock[0] += 60  # moodle needed one minute of its share
+        return {}
+
+    pipeline = _cli(session, monkeypatch, ["--source", "moodle", "--source", "classroom",
+                                           "--max-minutes", "600"], run_course)
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: clock[0])
+    pipeline.main()
+    # half each up front; what moodle didn't use goes to classroom
+    assert ran == [("moodle", 300 * 60), ("classroom", 599 * 60)]
+
+
+def test_main_without_a_budget_has_no_deadline(session, monkeypatch):
+    """No --max-minutes means no deadline for any source."""
+    seen = []
+    pipeline = _cli(session, monkeypatch, [], lambda *a, deadline, **kw: seen.append(
+        (a[1], deadline)) or {})
+    pipeline.main()
+    assert seen == [("moodle", None)]  # --source defaults to moodle
+
+
+def test_main_stops_a_source_whose_time_is_up(session, monkeypatch, capsys):
+    """A source that runs out of time skips its remaining courses."""
+    from app.models import User
+    from app.pipeline import StageResult
+
+    for n in range(2):  # two users' copies of one course
+        user = User(email=f"u{n}@x.edu")
+        session.add(user)
+        session.commit()
+        session.add(Course(source="moodle", source_id="42", name="c", user_id=user.id))
+    session.commit()
+    ran = []
+
+    def run_course(*a, **kw):
+        ran.append(a[2])
+        return {"extraction": StageResult(out_of_time=True)}
+
+    pipeline = _cli(session, monkeypatch, ["--course", "42", "--max-minutes", "5"], run_course)
+    pipeline.main()
+    assert len(ran) == 1  # the second copy waits for the next run
+    assert "time budget used up" in capsys.readouterr().out
+
+
+def test_main_stops_cleanly_on_sigterm(session, monkeypatch, capsys):
+    """SIGTERM raises Shutdown, exits 143, and a second signal is ignored."""
+    import signal
+
+    from app.jobs import Shutdown
+
+    released = []
+
+    def run_course(*a, **kw):
+        handler = signal.getsignal(signal.SIGTERM)
+        handler(signal.SIGTERM, None)  # what Cloud Run's timeout sends
+
+    monkeypatch.setattr(signal, "signal", lambda sig, h: released.append((sig, h)))
+    monkeypatch.setattr(signal, "getsignal", lambda sig: dict(released)[sig])
+    pipeline = _cli(session, monkeypatch, ["--source", "moodle", "--source", "classroom"],
+                    run_course)
+    with pytest.raises(SystemExit) as stop:
+        pipeline.main()
+    assert stop.value.code == 143
+    assert "stopped on SIGTERM" in capsys.readouterr().out
+    assert (signal.SIGTERM, signal.SIG_IGN) in released  # a second one can't interrupt cleanup
+    assert issubclass(Shutdown, BaseException)
+
+
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="advisory locks need Postgres")
 def test_single_run_wait_blocks_until_the_holder_releases():
     import threading
@@ -1652,3 +1738,109 @@ def test_an_interrupted_split_resumes_without_repeating_calls(session, monkeypat
     assert runs > 1  # the deadline really interrupted the split
     assert stored == len(expected)
     assert len(llm.sizes) == len(fresh.sizes)  # no call was repeated
+
+
+def test_a_stop_mid_call_checkpoints_the_unsent_section():
+    """SIGTERM during a call keeps the finished sections, and the interrupted
+    section is sent again on resume: nothing finished is repeated or lost."""
+    from app.chunk import chunk_sections
+    from app.jobs import Shutdown
+
+    sections = ["a", "b", "c"]
+
+    class StopOnSecondCall:
+        calls = 0
+
+        def complete_json(self, system, user, **kw):
+            self.calls += 1
+            if self.calls == 2:
+                raise Shutdown("SIGTERM")
+            return {"chunks": [{"title": "T", "content": user.split("\n\n", 1)[1]}]}
+
+    with pytest.raises(Shutdown) as info:
+        chunk_sections(sections, StopOnSecondCall())
+    stop = info.value.checkpoint
+    assert [c["content"] for c in stop.completed] == ["a"]
+    assert stop.resume_from == 1
+    assert stop.in_flight == {"index": 1, "partial": [], "pending": ["b"]}
+
+    resumed = []
+
+    class Count:
+        def complete_json(self, system, user, **kw):
+            resumed.append(user.split("\n\n", 1)[1])
+            return {"chunks": [{"title": "T", "content": resumed[-1]}]}
+
+    chunks, _ = chunk_sections(sections, Count(), resume_from=stop.resume_from,
+                               calls_before=stop.calls, resume_state=stop.in_flight)
+    assert resumed == ["b", "c"]
+    assert [c["content"] for c in stop.completed + chunks] == ["a", "b", "c"]
+
+
+def test_a_sigterm_during_a_split_keeps_the_checkpoint(session):
+    """chunk_resource saves the checkpoint for a SIGTERM stop as it does for a
+    deadline stop, so the next run resumes rather than starting over."""
+    from app.chunk import chunk_resource, chunk_sections
+    from app.jobs import Shutdown
+
+    text = ("word " * 1600).strip()  # one section, halved until it fits
+    expected, _ = chunk_sections([text], TruncatingLLM(1500))
+
+    class StopOnSecondCall(TruncatingLLM):
+        armed = True
+
+        def complete_json(self, system, user, **kw):
+            if self.armed and len(self.sizes) == 1:
+                self.armed = False
+                self.sizes.append(len(user))
+                raise Shutdown("SIGTERM")
+            return super().complete_json(system, user, **kw)
+
+    llm = StopOnSecondCall(1500)
+    r = _resource(session, status="extracted", extracted_text=text)
+    with pytest.raises(Shutdown):
+        chunk_resource(session, r, llm)
+    assert r.chunk_checkpoint is not None
+    assert r.chunk_checkpoint["in_flight"]["pending"]  # the unsent half is kept
+
+    assert chunk_resource(session, r, llm) == len(expected)
+
+
+def test_a_stop_in_a_resumed_split_keeps_every_unsent_half():
+    """A SIGTERM during a call for a half of a resumed split keeps that half
+    and the halves still queued: none is dropped, and the original section
+    is not added back to the checkpoint."""
+    from app.chunk import chunk_sections
+    from app.jobs import Shutdown
+
+    class StopAtOnce:
+        def complete_json(self, system, user, **kw):
+            raise Shutdown("SIGTERM")
+
+    state = {"index": 0, "partial": [], "pending": ["h1", "h2"]}
+    with pytest.raises(Shutdown) as info:
+        chunk_sections(["a"], StopAtOnce(), resume_state=state)
+    stop = info.value.checkpoint
+    assert stop.in_flight == {"index": 0, "partial": [], "pending": ["h1", "h2"]}
+
+
+def test_a_failed_checkpoint_commit_does_not_mask_the_shutdown(session, monkeypatch):
+    """If saving the checkpoint on SIGTERM fails, the Shutdown still propagates
+    (so the run stops) rather than the commit's error replacing it."""
+    import app.sync
+    from app.chunk import chunk_resource
+    from app.jobs import Shutdown
+
+    text = ("word " * 1600).strip()  # one section, halved until it fits
+
+    class StopOnFirstCall(TruncatingLLM):
+        def complete_json(self, system, user, **kw):
+            raise Shutdown("SIGTERM")
+
+    def broken_commit(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(app.sync, "commit_if_current", broken_commit)
+    r = _resource(session, status="extracted", extracted_text=text)
+    with pytest.raises(Shutdown):
+        chunk_resource(session, r, StopOnFirstCall(1500))

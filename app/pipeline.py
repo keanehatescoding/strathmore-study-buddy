@@ -1,7 +1,7 @@
 """Phase 2 pipeline: extract pending resources, then chunk extracted ones.
 
-Usage: python -m app.pipeline --source moodle [--course ID]
-       [--extract-only] [--chunk-only] [--max-minutes N]
+Usage: python -m app.pipeline --source moodle [--source classroom] [--course ID]
+       [--extract-only] [--chunk-only] [--quiz-only] [--pace S] [--max-minutes M]
 Chunking needs LLM_* in .env; extraction runs without it. --max-minutes
 stops between items (reporting out_of_time) so a scheduled run ends before
 the platform's task timeout instead of being killed mid-item.
@@ -58,6 +58,7 @@ class StageResult:
     out_of_time: bool = False  # stopped at its deadline; a re-run resumes
 
     def __str__(self) -> str:
+        """Counts plus why the stage stopped early, for the run log."""
         out = ", ".join(f"{k}={v}" for k, v in self.counts.items())
         if self.quota_exhausted:
             out += " (quota_exhausted: stopped, re-run to resume)"
@@ -98,6 +99,7 @@ RETRY_CAP = timedelta(hours=24)
 
 
 def _now() -> datetime:
+    """The current time in UTC, for retry_after comparisons."""
     return datetime.now(timezone.utc)
 
 
@@ -114,6 +116,7 @@ def _defer(r: Resource, error: str) -> None:
 
 
 def _succeeded(r: Resource) -> None:
+    """Clear a resource's failure backoff after a successful attempt."""
     r.attempts = 0
     r.retry_after = None
 
@@ -127,10 +130,12 @@ def _safe_rollback(session: Session) -> None:
 
 
 def _due():
+    """SQL filter: the resource is not in backoff, or its retry time has passed."""
     return or_(Resource.retry_after.is_(None), Resource.retry_after <= _now())
 
 
 def pending_resource_ids(session: Session, course_id=None, source=None) -> list:
+    """Ids of pending resources ready to extract, in id order."""
     q = (select(Resource.id).where(Resource.status == "pending", _due())
          .order_by(Resource.id))
     return session.exec(_scoped(q, course_id, source)).all()
@@ -138,6 +143,10 @@ def pending_resource_ids(session: Session, course_id=None, source=None) -> list:
 
 def chunkable_resource_ids(session: Session, course_id=None, source=None) -> list:
     # ids only: loading every extracted_text up front is what blew memory
+    """Ids of extracted resources ready to chunk.
+
+    Ids only: loading every extracted_text up front is what exhausted memory.
+    """
     q = (select(Resource.id)
          .where(Resource.extracted_text.is_not(None),
                 Resource.status.not_in(["failed", "skipped"]), _due())
@@ -172,6 +181,7 @@ def _owner_downloader_for(session: Session, make):
     cache: dict = {}
 
     def for_resource(r: Resource):
+        """Downloader for one resource, from its course owner's client, cached per owner."""
         topic = session.get(Topic, r.topic_id)
         course = session.get(Course, topic.course_id) if topic else None
         owner_id = course.user_id if course else None
@@ -184,10 +194,12 @@ def _owner_downloader_for(session: Session, make):
 
 
 def moodle_downloader_for(session: Session):
+    """Downloader for Moodle resources, using each owner's Moodle token."""
     from app.moodle import MoodleClient
     from app.moodle_tokens import token_for
 
     def make(user):
+        """Moodle download function for one user, or None if they have no token."""
         token = token_for(user)
         return MoodleClient(settings.moodle_base_url, token).download if token else None
 
@@ -200,6 +212,7 @@ def classroom_downloader_for(session: Session):
     from app.drive import DriveClient, build_service
 
     def make(user):
+        """Drive client for one user, or None if they have no Classroom token."""
         token = classroom_token_for(user)
         if not token:
             return None
@@ -241,6 +254,10 @@ def _save_db_failure(session: Session, rid, seen_hash, e: Exception) -> Resource
 def run_extraction(session: Session, downloader, course_id=None,
                    downloader_for=None, source=None,
                    deadline: float | None = None) -> StageResult:
+    """Download and extract pending resources.
+
+    Stops between items once `deadline` (a time.monotonic() value) passes, and reports out_of_time.
+    """
     result = StageResult(Counter(extracted=0, skipped=0, failed=0))
     counts = result.counts
     ids = pending_resource_ids(session, course_id, source)
@@ -324,6 +341,7 @@ def run_extraction(session: Session, downloader, course_id=None,
 
 def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
                  source=None, deadline: float | None = None) -> StageResult:
+    """Split extracted resources into chunks. Stops between items once `deadline` passes."""
     result = StageResult(Counter(chunks=0, cached=0, resources=0))
     counts = result.counts
     ids = chunkable_resource_ids(session, course_id, source)
@@ -448,6 +466,10 @@ def _quiz_failed(session: Session, chunk_id, attempt: int, e: Exception) -> int:
 
 def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
              pace: float = 0.0, source=None, deadline: float | None = None) -> StageResult:
+    """Generate quiz items for chunks not yet covered.
+
+    Stops between items once `deadline` passes.
+    """
     from uuid import UUID
 
     from app.notify import course_of_chunk, enqueue_new_material
@@ -539,6 +561,7 @@ def run_quiz(session: Session, llm, course_id=None, attempt: int = 1,
 
 
 def _lock_key(name: str) -> int:
+    """Stable signed 64-bit key for a named Postgres advisory lock."""
     digest = hashlib.sha256(name.encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)  # a Postgres bigint
 
@@ -640,9 +663,68 @@ def run_course(session: Session, source: str, course_id, chunk_llm=None, quiz_ll
     return out
 
 
+def _run_source(source: str, course: str | None, chunk_llm, quiz_llm, pace: float,
+                stages, deadline: float | None) -> None:
+    """One source's run under its single_run lock (see main)."""
+    for wait in (False, True):
+        with single_run(source, wait=wait, deadline=deadline) as got, \
+                Session(engine) as session:
+            if not got:
+                if deadline is not None and time.monotonic() >= deadline:
+                    print("out_of_time: stopped waiting for lock", flush=True)
+                    return
+                if pipeline_job_running(session, source):
+                    # a new user's first run (app.jobs): short, so wait it out
+                    # rather than skip everyone else's day
+                    print(f"a {source} pipeline job is running; waiting for it", flush=True)
+                    continue
+                print(f"another {source} pipeline run is in progress; exiting")
+                return
+            course_ids = [None]
+            if course:
+                # every user enrolled in the course has their own copy of it
+                course_ids = session.exec(
+                    select(Course.id).where(
+                        Course.source == source, Course.source_id == course,
+                        Course.user_id.is_not(None),
+                    ).order_by(Course.id)
+                ).all()
+                if not course_ids:
+                    raise SystemExit(f"course {course} not synced — run sync_cli first")
+            for course_id in course_ids:
+                out = run_course(session, source, course_id, chunk_llm, quiz_llm,
+                                 pace=pace, stages=stages, deadline=deadline)
+                if any(r.out_of_time for r in out.values()):
+                    print(f"{source}: time budget used up; the next run resumes", flush=True)
+                    return
+            return
+
+
+def _stop_on_signal(signum, frame) -> None:
+    """SIGTERM (a Cloud Run timeout or cancel, a redeploy): stop now rather
+    than be killed between commits. Every stage already lets a Shutdown
+    through cleanly, as it does when the worker runs a pipeline job."""
+    import signal
+
+    from app.jobs import Shutdown
+
+    signal.signal(signum, signal.SIG_IGN)  # once: don't interrupt the cleanup too
+    raise Shutdown(signal.Signals(signum).name)
+
+
 def main() -> None:
+    """CLI entry point.
+
+    Parses flags, shares any --max-minutes budget across sources, and runs each source under
+    its lock. SIGTERM stops the run cleanly with exit 143.
+    """
+    import signal
+
+    from app.jobs import Shutdown
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["moodle", "classroom"], default="moodle")
+    parser.add_argument("--source", choices=["moodle", "classroom"], action="append",
+                        help="repeat to run several in turn (default: moodle)")
     parser.add_argument("--course", default=None)
     parser.add_argument("--extract-only", action="store_true")
     parser.add_argument("--chunk-only", action="store_true")
@@ -650,13 +732,13 @@ def main() -> None:
     parser.add_argument("--pace", type=float, default=settings.llm_pace,
                         help="seconds between LLM calls (default LLM_PACE; "
                              "raise it for free-tier rate limits)")
-    parser.add_argument("--max-minutes", type=float, default=None,
-                        help="stop between items after N minutes and report "
-                             "out_of_time (keep it below the job's task timeout)")
+    parser.add_argument("--max-minutes", type=float, default=0,
+                        help="stop between items after this long (0 = no limit), "
+                             "shared out so every --source gets its turn; set it "
+                             "below the job's timeout")
     args = parser.parse_args()
+    sources = list(dict.fromkeys(args.source or ["moodle"]))
 
-    deadline = (time.monotonic() + args.max_minutes * 60
-                if args.max_minutes is not None else None)
     stages = [st for st, skip in zip(STAGES, (
         args.chunk_only or args.quiz_only,
         args.extract_only or args.quiz_only,
@@ -666,38 +748,22 @@ def main() -> None:
     if "chunking" in stages or "quiz" in stages:
         chunk_llm, quiz_llm = llm_clients()
 
-    for wait in (False, True):
-        with single_run(args.source, wait=wait, deadline=deadline) as got, \
-                Session(engine) as session:
-            if not got:
-                if deadline is not None and time.monotonic() >= deadline:
-                    print("out_of_time: stopped waiting for lock", flush=True)
-                    return
-                if pipeline_job_running(session, args.source):
-                    # a new user's first run (app.jobs): short, so wait it out
-                    # rather than skip everyone else's day
-                    print(f"a {args.source} pipeline job is running; waiting for it",
-                          flush=True)
-                    continue
-                print(f"another {args.source} pipeline run is in progress; exiting")
-                return
-            course_ids = [None]
-            if args.course:
-                # every user enrolled in the course has their own copy of it
-                course_ids = session.exec(
-                    select(Course.id).where(
-                        Course.source == args.source, Course.source_id == args.course,
-                        Course.user_id.is_not(None),
-                    ).order_by(Course.id)
-                ).all()
-                if not course_ids:
-                    raise SystemExit(f"course {args.course} not synced — run sync_cli first")
-            for course_id in course_ids:
-                r = run_course(session, args.source, course_id, chunk_llm, quiz_llm,
-                               pace=args.pace, stages=stages, deadline=deadline)
-                if any(v.out_of_time for v in r.values()):
-                    return
-            return
+    previous = signal.signal(signal.SIGTERM, _stop_on_signal)
+    end = time.monotonic() + args.max_minutes * 60 if args.max_minutes > 0 else None
+    try:
+        for i, source in enumerate(sources):
+            deadline = None
+            if end is not None:
+                # an equal share of what's left: time a source didn't need
+                # goes to the ones after it
+                now = time.monotonic()
+                deadline = now + max(0.0, end - now) / (len(sources) - i)
+            _run_source(source, args.course, chunk_llm, quiz_llm, args.pace, stages, deadline)
+    except Shutdown as e:
+        print(f"stopped on {e}; the next run resumes", flush=True)
+        raise SystemExit(143) from None
+    finally:
+        signal.signal(signal.SIGTERM, previous)  # when called in-process (tests)
 
 
 if __name__ == "__main__":

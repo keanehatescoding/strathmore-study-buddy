@@ -51,7 +51,7 @@ class ChunkingDeadline(RuntimeError):
     not stored until every section has succeeded."""
 
     def __init__(self, message="time budget exhausted", completed=None,
-                 resume_from=0):
+                 resume_from=0, calls=0):
         super().__init__(message)
         self.completed = list(completed or [])
         # aliases for callers/tests that name these differently
@@ -60,6 +60,8 @@ class ChunkingDeadline(RuntimeError):
         self.resume_from = resume_from
         self.next_section = resume_from
         self.resume_at = resume_from
+        # cumulative LLM calls for the resource, across resumed runs
+        self.calls = calls
 
 SYSTEM = """You split study material into coherent chunks for quiz generation.
 Rules:
@@ -133,13 +135,16 @@ def locate(content: str, full: str) -> tuple[int | None, int | None]:
 def chunk_sections(sections: list[str], llm: LLMClient,
                    max_calls: int = MAX_SECTIONS,
                    deadline: float | None = None,
-                   resume_from: int = 0) -> tuple[list[dict], int]:
+                   resume_from: int = 0,
+                   calls_before: int = 0) -> tuple[list[dict], int]:
     """Chunk sections in order with at most max_calls LLM calls, halves of a
-    truncated section included. Returns (chunks, sections left unstudied) for
-    a cap stop. Raises ChunkingDeadline when the deadline passes: a deadline
+    truncated section included. calls_before counts calls already made for
+    this resource by earlier (deadline-stopped) runs, so the cap is per
+    resource, not per run. Returns (chunks, sections left unstudied) for a
+    cap stop. Raises ChunkingDeadline when the deadline passes: a deadline
     stop must not be stored as a final, cached result."""
     import time
-    out, calls = [], 0
+    out, calls = [], calls_before
     # only sections not already checkpointed are processed
     todo = [(i, s) for i, s in reversed(list(enumerate(sections)))
             if i >= resume_from]  # a stack
@@ -153,7 +158,8 @@ def chunk_sections(sections: list[str], llm: LLMClient,
             return out + current_chunks, len({i for i, _ in todo})
         if deadline is not None and time.monotonic() >= deadline:
             raise ChunkingDeadline(
-                "time budget exhausted", completed=out, resume_from=next_section)
+                "time budget exhausted", completed=out, resume_from=next_section,
+                calls=calls)
         i, section = todo.pop()
         # a new original section starts: the previous one is complete
         if current_i is not None and i != current_i:
@@ -257,6 +263,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
         checkpoint = {}  # made for different text: start over
     resume_from = int(checkpoint.get("next_section", 0) or 0)
     completed_chunks = list(checkpoint.get("chunks") or [])
+    prior_calls = int(checkpoint.get("calls", 0) or 0)
     if not text.strip():
         items = []
         resource.chunk_checkpoint = None
@@ -265,7 +272,8 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
         # if the checkpoint already covers everything, just finalize it
         try:
             new_chunks, left = chunk_sections(
-                sections, llm, deadline=deadline, resume_from=resume_from
+                sections, llm, deadline=deadline, resume_from=resume_from,
+                calls_before=prior_calls,
             )  # paid work: before any delete
         except ChunkingDeadline as e:
             # preserve the sections done so far as a resumable checkpoint,
@@ -275,6 +283,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
                 "text_id": text_id,
                 "next_section": int(e.resume_from),
                 "chunks": ckpt_chunks,
+                "calls": int(e.calls),
             }
             session.add(resource)
             if not commit_if_current(session, resource.id, seen_hash, seen_text=text):

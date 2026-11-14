@@ -1577,3 +1577,41 @@ def test_completed_quiz_run_queues_new_material_once(session):
     assert run_quiz(session, FlakyQuizLLM(fail=0)).counts["events"] == 1
     [event] = _new_material(session)
     assert event.payload["new_items"] == 2
+
+
+def test_a_resumed_resource_keeps_its_call_budget(monkeypatch):
+    """Calls made before a deadline stop count against MAX_SECTIONS on resume:
+    the per-resource cap must not reset each run."""
+    import time
+
+    from app.chunk import MAX_SECTIONS, ChunkingDeadline, chunk_sections
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    sections = [f"s{i}" for i in range(MAX_SECTIONS + 5)]
+
+    class SlowLLM:
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10
+            return {"chunks": [{"title": "T", "content": "x"}]}
+
+    with pytest.raises(ChunkingDeadline) as info:
+        chunk_sections(sections, SlowLLM(), deadline=25.0)
+    first_calls = info.value.calls
+    assert first_calls == 3  # calls at t=0, 10, 20; the t=30 check stops it
+
+    # resume with the cumulative count: the cap leaves only the remaining budget
+    clock[0] = 0.0
+    calls = []
+
+    class CountingLLM:
+        def complete_json(self, system, user, **kw):
+            calls.append(1)
+            return {"chunks": [{"title": "T", "content": "x"}]}
+
+    _, left = chunk_sections(
+        sections, CountingLLM(), resume_from=info.value.resume_from,
+        calls_before=first_calls,
+    )
+    assert len(calls) == MAX_SECTIONS - first_calls
+    assert left > 0  # the rest is past the per-resource cap

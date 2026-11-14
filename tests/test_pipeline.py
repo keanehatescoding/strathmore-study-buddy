@@ -1615,3 +1615,40 @@ def test_a_resumed_resource_keeps_its_call_budget(monkeypatch):
     )
     assert len(calls) == MAX_SECTIONS - first_calls
     assert left > 0  # the rest is past the per-resource cap
+
+
+def test_an_interrupted_split_resumes_without_repeating_calls(session, monkeypatch):
+    """A section cut off mid-split keeps its finished halves and unsent halves
+    in the checkpoint: the resumed run makes exactly the calls an
+    uninterrupted run makes, and stores the same chunks."""
+    import time
+
+    from app.chunk import ChunkingDeadline, chunk_resource, chunk_sections
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    text = ("word " * 1600).strip()  # one section, halved until it fits
+
+    fresh = TruncatingLLM(1500)
+    expected, _ = chunk_sections([text], fresh)
+
+    class BudgetLLM(TruncatingLLM):
+        def complete_json(self, system, user, **kw):
+            clock[0] += 10  # three calls fit in each run
+            return super().complete_json(system, user, **kw)
+
+    llm = BudgetLLM(1500)
+    r = _resource(session, status="extracted", extracted_text=text)
+    runs = 0
+    while True:
+        runs += 1
+        assert runs <= 10
+        clock[0] = 0.0
+        try:
+            stored = chunk_resource(session, r, llm, deadline=25.0)
+            break
+        except ChunkingDeadline:
+            continue
+    assert runs > 1  # the deadline really interrupted the split
+    assert stored == len(expected)
+    assert len(llm.sizes) == len(fresh.sizes)  # no call was repeated

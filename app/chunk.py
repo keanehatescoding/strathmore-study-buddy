@@ -51,7 +51,7 @@ class ChunkingDeadline(RuntimeError):
     not stored until every section has succeeded."""
 
     def __init__(self, message="time budget exhausted", completed=None,
-                 resume_from=0, calls=0):
+                 resume_from=0, calls=0, in_flight=None):
         super().__init__(message)
         self.completed = list(completed or [])
         # aliases for callers/tests that name these differently
@@ -62,6 +62,9 @@ class ChunkingDeadline(RuntimeError):
         self.resume_at = resume_from
         # cumulative LLM calls for the resource, across resumed runs
         self.calls = calls
+        # a section left mid-split: {"index", "partial" (finished halves'
+        # chunks), "pending" (halves not yet sent)}, or None
+        self.in_flight = in_flight
 
 SYSTEM = """You split study material into coherent chunks for quiz generation.
 Rules:
@@ -136,7 +139,8 @@ def chunk_sections(sections: list[str], llm: LLMClient,
                    max_calls: int = MAX_SECTIONS,
                    deadline: float | None = None,
                    resume_from: int = 0,
-                   calls_before: int = 0) -> tuple[list[dict], int]:
+                   calls_before: int = 0,
+                   resume_state: dict | None = None) -> tuple[list[dict], int]:
     """Chunk sections in order with at most max_calls LLM calls, halves of a
     truncated section included. calls_before counts calls already made for
     this resource by earlier (deadline-stopped) runs, so the cap is per
@@ -152,14 +156,31 @@ def chunk_sections(sections: list[str], llm: LLMClient,
     current_chunks: list[dict] = []
     # next original section to process (resume point while one is in flight)
     next_section = resume_from
+    if resume_state:
+        # a section was mid-split at the last stop: its finished halves and
+        # its unsent halves come back, so no call is made twice
+        idx = int(resume_state["index"])
+        todo = [t for t in todo if t[0] != idx]
+        todo.extend((idx, h) for h in reversed(resume_state["pending"]))
+        current_i = idx
+        current_chunks = list(resume_state.get("partial") or [])
+        next_section = idx
     while todo:
         if calls >= max_calls:
             # cap stop is final: keep whatever is in flight too
             return out + current_chunks, len({i for i, _ in todo})
         if deadline is not None and time.monotonic() >= deadline:
+            in_flight = None
+            if current_i is not None:
+                in_flight = {
+                    "index": current_i,
+                    "partial": current_chunks,
+                    # unsent halves of this section, next one first
+                    "pending": [s for i, s in reversed(todo) if i == current_i],
+                }
             raise ChunkingDeadline(
                 "time budget exhausted", completed=out, resume_from=next_section,
-                calls=calls)
+                calls=calls, in_flight=in_flight)
         i, section = todo.pop()
         # a new original section starts: the previous one is complete
         if current_i is not None and i != current_i:
@@ -264,6 +285,9 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
     resume_from = int(checkpoint.get("next_section", 0) or 0)
     completed_chunks = list(checkpoint.get("chunks") or [])
     prior_calls = int(checkpoint.get("calls", 0) or 0)
+    in_flight = checkpoint.get("in_flight")
+    if not isinstance(in_flight, dict):
+        in_flight = None
     if not text.strip():
         items = []
         resource.chunk_checkpoint = None
@@ -273,7 +297,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
         try:
             new_chunks, left = chunk_sections(
                 sections, llm, deadline=deadline, resume_from=resume_from,
-                calls_before=prior_calls,
+                calls_before=prior_calls, resume_state=in_flight,
             )  # paid work: before any delete
         except ChunkingDeadline as e:
             # preserve the sections done so far as a resumable checkpoint,
@@ -284,6 +308,7 @@ def chunk_resource(session: Session, resource, llm: LLMClient | None = None,
                 "next_section": int(e.resume_from),
                 "chunks": ckpt_chunks,
                 "calls": int(e.calls),
+                "in_flight": e.in_flight,
             }
             session.add(resource)
             if not commit_if_current(session, resource.id, seen_hash, seen_text=text):

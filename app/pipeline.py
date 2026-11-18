@@ -236,19 +236,21 @@ def _share_failed(session: Session, rid, e: Exception, counts) -> Resource | Non
     return session.get(Resource, rid)
 
 
-def _save_db_failure(session: Session, rid, seen_hash, e: Exception) -> Resource | None:
+def _save_db_failure(session: Session, rid, seen_hash, e: Exception,
+                     seen_text: str | None = None) -> Resource | None:
     """Mark a resource failed after the database refused its extraction (None
     if it is gone or changed meanwhile). Left pending, it would come first,
     and fail the same way, on every later run."""
     session.rollback()
     r = session.get(Resource, rid)
-    if r is None or r.content_hash != seen_hash:
+    if (r is None or r.content_hash != seen_hash
+            or (seen_text is not None and (r.extracted_text or "") != seen_text)):
         return None
     cause = getattr(e, "orig", None) or e  # the driver's message, not the SQL and its text
     r.status = "failed"
     r.error = f"couldn't save the extracted text: {type(cause).__name__}: {cause}"[:500]
     session.add(r)
-    return r if commit_if_current(session, rid, seen_hash) else None
+    return r if commit_if_current(session, rid, seen_hash, seen_text=seen_text) else None
 
 
 def run_extraction(session: Session, downloader, course_id=None,
@@ -269,6 +271,7 @@ def run_extraction(session: Session, downloader, course_id=None,
             counts["changed"] += 1
             continue
         seen_hash = r.content_hash  # what the text will be of
+        seen_text = r.extracted_text  # the text extraction is built from
         dl = downloader_for(r) if downloader_for else downloader
         if dl is None and r.type == "file" and downloader_for:
             # owner hasn't connected this source: leave pending, retry once they do
@@ -285,7 +288,7 @@ def run_extraction(session: Session, downloader, course_id=None,
         if shared:
             _succeeded(r)
             session.add(r)
-            if not commit_if_current(session, rid, seen_hash):
+            if not commit_if_current(session, rid, seen_hash, seen_text=seen_text):
                 counts["changed"] += 1
                 continue
             counts["shared"] += 1
@@ -325,9 +328,9 @@ def run_extraction(session: Session, downloader, course_id=None,
             outcome = "failed"
         session.add(r)
         try:
-            saved = commit_if_current(session, rid, seen_hash)
+            saved = commit_if_current(session, rid, seen_hash, seen_text=seen_text)
         except DBAPIError as e:  # text the database won't store: fail this one, not the run
-            r = _save_db_failure(session, rid, seen_hash, e)
+            r = _save_db_failure(session, rid, seen_hash, e, seen_text=seen_text)
             saved, outcome = r is not None, "failed"
         if not saved:
             # a sync replaced the content meanwhile: it is pending again

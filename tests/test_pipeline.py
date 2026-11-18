@@ -1288,10 +1288,10 @@ def test_a_database_error_fails_one_resource_not_the_run(session, monkeypatch):
     downloader = _two_resources_one_unsaveable(session)
     real = pipeline.commit_if_current
 
-    def commit(s, rid, seen_hash):
+    def commit(s, rid, seen_hash, seen_text=None):
         if s.get(Resource, rid).extracted_text == "bad":
             raise DataError("INSERT", {}, Exception("text fields cannot contain NUL"))
-        return real(s, rid, seen_hash)
+        return real(s, rid, seen_hash, seen_text=seen_text)
 
     monkeypatch.setattr(pipeline, "commit_if_current", commit)
     counts = run_extraction(session, downloader).counts

@@ -355,7 +355,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             counts["changed"] += 1
             continue
         seen_hash = r.content_hash
-        seen_text = r.extracted_text  # the text chunking is built from
+        # the text chunking is built from; "" not None, since commit_if_current
+        # skips its text check for None (chunk_resource already treats None as "")
+        seen_text = r.extracted_text or ""
         has_chunks = session.exec(
             select(func.count()).select_from(Chunk).where(Chunk.resource_id == r.id)
         ).one()

@@ -281,7 +281,8 @@ def run_extraction(session: Session, downloader, course_id=None,
             shared = copy_extraction(session, r, dl)
         except Exception as e:  # sharing is a shortcut: fall back to downloading
             r = _share_failed(session, rid, e, counts)
-            if r is None or r.content_hash != seen_hash:
+            if (r is None or r.content_hash != seen_hash
+                    or (r.extracted_text or "") != (seen_text or "")):
                 counts["changed"] += 1
                 continue
             shared = False
@@ -354,6 +355,9 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             counts["changed"] += 1
             continue
         seen_hash = r.content_hash
+        # the text chunking is built from; "" not None, since commit_if_current
+        # skips its text check for None (chunk_resource already treats None as "")
+        seen_text = r.extracted_text or ""
         has_chunks = session.exec(
             select(func.count()).select_from(Chunk).where(Chunk.resource_id == r.id)
         ).one()
@@ -371,7 +375,8 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             continue
         except Exception as e:  # sharing is a shortcut: fall back to chunking
             r = _share_failed(session, rid, e, counts)
-            if r is None or r.content_hash != seen_hash:
+            if (r is None or r.content_hash != seen_hash
+                    or (r.extracted_text or "") != (seen_text or "")):
                 counts["changed"] += 1
                 continue
             shared = 0
@@ -379,7 +384,7 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r.attempts or r.retry_after:
                 _succeeded(r)
                 session.add(r)
-                if not commit_if_current(session, rid, seen_hash):
+                if not commit_if_current(session, rid, seen_hash, seen_text=seen_text):
                     counts["changed"] += 1  # its copied chunks went with the old content
                     continue
             counts["chunks"] += shared
@@ -412,7 +417,8 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
         except Exception as e:
             session.rollback()
             r = session.get(Resource, rid)
-            if r is None or r.content_hash != seen_hash:
+            if (r is None or r.content_hash != seen_hash
+                    or (r.extracted_text or "") != (seen_text or "")):
                 counts["changed"] += 1  # failure was on content since replaced
                 continue
             # keep the cap note: the retry chunks the same truncated text
@@ -422,7 +428,7 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             if r.attempts >= MAX_CHUNK_ATTEMPTS:
                 r.status = "failed"  # existing chunks, if any, are kept
             session.add(r)
-            if not commit_if_current(session, rid, seen_hash):
+            if not commit_if_current(session, rid, seen_hash, seen_text=seen_text):
                 counts["changed"] += 1
                 continue
             counts["errors"] += 1
@@ -432,7 +438,7 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
         if r.attempts or r.retry_after:
             _succeeded(r)
             session.add(r)
-            if not commit_if_current(session, rid, seen_hash):
+            if not commit_if_current(session, rid, seen_hash, seen_text=seen_text):
                 counts["changed"] += 1
                 print(f"  chunk {i}/{len(ids)} changed meanwhile, dropped", flush=True)
                 continue

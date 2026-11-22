@@ -281,7 +281,8 @@ def run_extraction(session: Session, downloader, course_id=None,
             shared = copy_extraction(session, r, dl)
         except Exception as e:  # sharing is a shortcut: fall back to downloading
             r = _share_failed(session, rid, e, counts)
-            if r is None or r.content_hash != seen_hash:
+            if (r is None or r.content_hash != seen_hash
+                    or (r.extracted_text or "") != (seen_text or "")):
                 counts["changed"] += 1
                 continue
             shared = False
@@ -372,7 +373,8 @@ def run_chunking(session: Session, llm, course_id=None, pace: float = 0.0,
             continue
         except Exception as e:  # sharing is a shortcut: fall back to chunking
             r = _share_failed(session, rid, e, counts)
-            if r is None or r.content_hash != seen_hash:
+            if (r is None or r.content_hash != seen_hash
+                    or (r.extracted_text or "") != (seen_text or "")):
                 counts["changed"] += 1
                 continue
             shared = 0

@@ -549,7 +549,7 @@ def test_single_send_uses_stable_event_key(session, monkeypatch):
     notify.send_pending(session, "key", "from@x")
     event = session.exec(select(NotificationEvent)).one()
     assert calls.keys == [notify._idempotency_key([(event, calls[0][0])])]
-    assert event.batch_key is None
+    assert event.batch_key and event.batch_key.startswith(notify.BATCH_PREFIX)
 
 
 def test_ambiguous_batch_failure_resends_same_batch_same_key(session, monkeypatch):
@@ -580,6 +580,32 @@ def test_ambiguous_batch_failure_resends_same_batch_same_key(session, monkeypatc
     assert calls.keys[0] == first_key  # same events, same body -> same key
     assert calls.keys[1] != first_key
     assert [len(c) for c in calls] == [3, 1]
+
+
+def test_ambiguous_single_failure_not_rebundled(session, monkeypatch):
+    def lost(emails):
+        raise notify.EmailError("send failed: timed out", "network:TimeoutError")
+
+    calls = _fake_batches(monkeypatch, lost)
+    real_key = notify._idempotency_key
+    keys = []
+    monkeypatch.setattr(notify, "_idempotency_key", lambda b: keys.append(real_key(b)) or keys[-1])
+    _owned_events(session, 1)
+    out = notify.send_pending(session, "key", "from@x")
+    assert out == {"sent": 0, "failed": 1, "errors": {"network:TimeoutError": 1}}
+    event = session.exec(select(NotificationEvent)).one()
+    assert event.batch_key and event.batch_key.startswith(notify.BATCH_PREFIX)
+    [first_key] = keys
+
+    session.add(NotificationEvent(user_id=event.user_id, type="review_due",
+                                  payload={"due_count": 99}))
+    session.commit()
+    calls = _fake_batches(monkeypatch)
+    out = notify.send_pending(session, "key", "from@x")
+    assert out == {"sent": 2, "failed": 0, "errors": {}}
+    assert calls.keys[0] == first_key  # resent alone, not rebundled
+    assert calls.keys[1] != first_key
+    assert [len(c) for c in calls] == [1, 1]
 
 
 def _newest(session):

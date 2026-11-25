@@ -401,9 +401,11 @@ def send_pending(
     MAX_SEND_ATTEMPTS-th attempt leaves it as GAVE_UP. A rate limit isn't
     the event's fault and gives its attempt back.
 
-    Duplicate safety: a multi-email batch gets a batch_key, committed before
+    Duplicate safety: a batch gets a batch_key, committed before
     the request, so a failure that might have been delivered (network, 5xx,
-    ...) leaves the batch as-is and later passes resend the same events. The
+    ...) leaves the batch as-is and later passes resend the same events. Singles
+    are tagged too, so they aren't rebundled into a batch with a different
+    Idempotency-Key. The
     Idempotency-Key hashes the event ids and request body (_idempotency_key):
     an unchanged resend reuses it, while a changed body (recipient dropped,
     new base URL) gets a fresh key instead of a 409 for 24h. Only a confirmed
@@ -553,7 +555,7 @@ def _deliver(session: Session, api_key: str, batch, sleep) -> None:
             _tag_batch(session, batch)
             send_batch(api_key, emails, _idempotency_key(batch), sleep=sleep)
     else:
-        if len(batch) > 1 and batch[0][0].batch_key is None:
+        if batch[0][0].batch_key is None:
             _tag_batch(session, batch)
         send_batch(api_key, emails, _idempotency_key(batch), sleep=sleep)
     now = datetime.now(timezone.utc)

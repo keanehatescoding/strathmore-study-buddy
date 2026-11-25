@@ -625,7 +625,7 @@ def test_server_error_does_not_split_batch(session, monkeypatch):
     assert out["errors"] == {"http_500": 3} and attempts == [3]  # no singles
 
 
-def test_validation_split_clears_batch_key(session, monkeypatch):
+def test_validation_split_sends_singles_with_individual_batch_keys(session, monkeypatch):
     def reject_batches(emails):
         if len(emails) > 1:
             raise notify.EmailError("422", notify.BATCH_REJECTED)
@@ -634,7 +634,7 @@ def test_validation_split_clears_batch_key(session, monkeypatch):
     _owned_events(session, 2)
     assert notify.send_pending(session, "key", "from@x")["sent"] == 2
     events = session.exec(select(NotificationEvent)).all()
-    assert all(e.batch_key is None for e in events)
+    assert all(e.batch_key and e.batch_key.startswith(notify.BATCH_PREFIX) for e in events)
     assert len(set(calls.keys)) == 2  # one key per single send
 
 

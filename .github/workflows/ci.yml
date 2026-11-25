@@ -24,7 +24,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg://studybuddy:studybuddy@localhost:5432/studybuddy
       DEV: "1"  # the public default SECRET_KEY is fine for tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0  # gitleaks scans a commit range, so it needs history
@@ -58,7 +58,7 @@ jobs:
   image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - run: docker build -t study-buddy .
